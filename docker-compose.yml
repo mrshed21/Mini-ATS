@@ -1,0 +1,8 @@
+services:
+  ats-app:
+    build: .
+    ports:
+      - "3070:3000"
+    env_file:
+      - .env
+    restart: unless-stopped
