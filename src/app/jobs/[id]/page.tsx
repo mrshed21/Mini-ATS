@@ -17,7 +17,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd'
-import { ArrowLeft, Search, Plus, MoreHorizontal, Mail, Phone, Linkedin, FileText, Trash2, Edit2, GripVertical } from 'lucide-react'
+import { ArrowLeft, Search, Plus, MoreHorizontal, Mail, Phone, ExternalLink , FileText, Trash2, Edit2, GripVertical } from 'lucide-react'
 import Link from 'next/link'
 import CandidateModal from '@/components/candidate-modal'
 
@@ -271,7 +271,7 @@ export default function JobCandidatesKanbanPage() {
                                           <div className="flex items-center text-[11px] text-muted-foreground gap-2">
                                             {candidate.resume_url ? (
                                                 <a href={candidate.resume_url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 hover:text-primary transition-colors truncate" onClick={e => e.stopPropagation()}>
-                                                    <Linkedin className="w-3 h-3 text-[#0a66c2]" /> LinkedIn Profile
+                                                    <ExternalLink className="w-3 h-3 text-[#0a66c2]" /> Resume
                                                 </a>
                                             ) : (
                                                 <><Phone className="w-3 h-3 text-muted-foreground/70" /> <span>{candidate.phone}</span></>

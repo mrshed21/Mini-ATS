@@ -26,7 +26,7 @@ import Link from 'next/link'
 import { 
   ArrowLeft, MapPin, Briefcase, DollarSign, Edit, 
   Columns, Users, Mail, Pencil, Trash2, Plus, 
-  Linkedin, Calendar, CheckCircle
+  ExternalLink , Calendar, CheckCircle
 } from 'lucide-react'
 import CandidateModal from '@/components/candidate-modal'
 
@@ -305,7 +305,7 @@ export default function JobDetailsPage() {
                                 <span className="flex items-center gap-1"><Mail className="w-3 h-3"/> {candidate.email}</span>
                                 {candidate.resume_url && (
                                   <a href={candidate.resume_url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-[#0a66c2] hover:underline" onClick={e => e.stopPropagation()}>
-                                    <Linkedin className="w-3 h-3"/> LinkedIn
+                                    <ExternalLink className="w-3 h-3"/> Resume
                                   </a>
                                 )}
                               </div>
