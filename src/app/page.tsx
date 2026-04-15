@@ -136,7 +136,7 @@ export default function Home() {
       {/* Footer */}
       <footer className="py-12 border-t border-border/50 bg-background">
         <div className="container mx-auto px-6 text-center text-muted-foreground text-sm">
-          <p>© {new Date().getFullYear()} Mini-ATS. Crafted for LIA Internship.</p>
+          <p>© {new Date().getFullYear()} Mini-ATS. All rights reserved.</p>
         </div>
       </footer>
     </div>

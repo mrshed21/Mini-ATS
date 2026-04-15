@@ -79,18 +79,12 @@ export default function LoginPage() {
         </div>
 
         <div className="relative z-10 mb-20 text-white max-w-xl text-balance">
-          <p className="text-3xl font-medium leading-relaxed tracking-tight mb-6">
-            "Mini-ATS has completely transformed how we evaluate candidates. The interface is not just beautiful—it's insanely fast and intuitive."
+          <h2 className="text-4xl font-bold tracking-tight mb-4">
+            Welcome to Mini-ATS
+          </h2>
+          <p className="text-lg text-muted-foreground">
+            “Track your candidates effortlessly with a clear Kanban workflow.”
           </p>
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-full bg-white/10 flex items-center justify-center border border-white/20">
-               <span className="font-bold text-lg">AJ</span>
-            </div>
-            <div>
-              <p className="font-medium text-white/90">A. Johansson</p>
-              <p className="text-sm text-white/50">Lead Recruiter, TechCorp AB</p>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -172,4 +166,4 @@ export default function LoginPage() {
       </div>
     </div>
   )
-}
+}
