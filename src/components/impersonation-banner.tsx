@@ -25,8 +25,8 @@ export function ImpersonationBanner() {
         <AlertTriangle className="w-4 h-4 animate-pulse text-amber-950" />
       </div>
       <div className="flex flex-col">
-        <span className="font-bold text-sm leading-tight leading-none mb-0.5">
-          Impersonating User
+        <span className="font-bold text-sm leading-none mb-0.5">
+          Impersonating {data.role === 'company_admin' ? 'Company Admin' : 'User'}
         </span>
         <span className="text-xs font-medium opacity-80 leading-none">
           {data.userName || data.userEmail}

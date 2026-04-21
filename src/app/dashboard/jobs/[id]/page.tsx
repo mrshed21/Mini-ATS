@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { logActivityAuto } from '@/lib/audit'
 import { Job, Candidate, JobStatus, JobType } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -104,6 +105,17 @@ export default function JobDetailsPage() {
         .eq('id', jobId)
 
       if (error) throw error
+
+      await logActivityAuto(supabase, {
+        action: 'update',
+        entityType: 'job',
+        entityId: jobId,
+        entityName: editTitle,
+        oldValue: { title: job?.title, status: job?.status },
+        newValue: { title: editTitle, status: editStatus },
+        companyId: job?.company_id,
+      })
+
       setIsEditJobOpen(false)
       loadData()
     } catch (error) {
@@ -115,9 +127,17 @@ export default function JobDetailsPage() {
 
   async function handleDeleteCandidate(id: string) {
     if (!confirm('Are you sure you want to delete this candidate?')) return
+    const candidateName = candidates.find(c => c.id === id)?.full_name
     try {
       const { error } = await supabase.from('candidates').delete().eq('id', id)
       if (error) throw error
+      await logActivityAuto(supabase, {
+        action: 'delete',
+        entityType: 'candidate',
+        entityId: id,
+        entityName: candidateName,
+        companyId: job?.company_id,
+      })
       loadData()
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete')

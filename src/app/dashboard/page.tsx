@@ -6,15 +6,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import Link from 'next/link'
 import { Briefcase, Users, Plus, ArrowRight, UserPlus, FileText, CalendarDays } from 'lucide-react'
-import { useImpersonation, getEffectiveUserId } from '@/lib/contexts/impersonation-context'
+import { useAuth } from '@/lib/contexts/auth-context'
+import { useImpersonation, getEffectiveUserId, getEffectiveCompanyId } from '@/lib/contexts/impersonation-context'
 
-export default function CustomerDashboard() {
+export default function DashboardPage() {
   const [jobsCount, setJobsCount] = useState(0)
   const [candidatesCount, setCandidatesCount] = useState(0)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [recentJobs, setRecentJobs] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
 
   const supabase = createClient()
+  const { role, companyId } = useAuth()
   const { impersonating, data: impData, isLoaded } = useImpersonation()
 
   useEffect(() => {
@@ -24,23 +27,38 @@ export default function CustomerDashboard() {
       setLoading(true)
       const { data: { user } } = await supabase.auth.getUser()
       const targetUserId = getEffectiveUserId(impersonating, impData, user?.id)
+      const targetCompanyId = getEffectiveCompanyId(impersonating, impData, companyId ?? undefined)
 
-      if (targetUserId) {
-        const [{ count: jCount }, { count: cCount }, { data: rJobs }] = await Promise.all([
-          supabase.from('jobs').select('*', { count: 'exact', head: true }).eq('customer_id', targetUserId),
-          supabase.from('candidates').select('*', { count: 'exact', head: true }),
-          supabase.from('jobs').select('*').eq('customer_id', targetUserId).order('created_at', { ascending: false }).limit(5)
-        ])
+      if (targetUserId || targetCompanyId) {
+        if (role === 'company_admin' && targetCompanyId && !impersonating) {
+          // Company Admin: fetch all company jobs & candidates
+          const [{ count: jCount }, { count: cCount }, { data: rJobs }] = await Promise.all([
+            supabase.from('jobs').select('*', { count: 'exact', head: true }).eq('company_id', targetCompanyId),
+            supabase.from('candidates').select('id, job_id, jobs!inner(company_id)').eq('jobs.company_id', targetCompanyId),
+            supabase.from('jobs').select('*').eq('company_id', targetCompanyId).order('created_at', { ascending: false }).limit(5)
+          ])
 
-        setJobsCount(jCount || 0)
-        setCandidatesCount(cCount || 0)
-        setRecentJobs(rJobs || [])
+          setJobsCount(jCount || 0)
+          setCandidatesCount(cCount || 0)
+          setRecentJobs(rJobs || [])
+        } else {
+          // Customer (or impersonated admin): fetch own jobs & candidates
+          const [{ count: jCount }, { count: cCount }, { data: rJobs }] = await Promise.all([
+            supabase.from('jobs').select('*', { count: 'exact', head: true }).eq('customer_id', targetUserId),
+            supabase.from('candidates').select('*', { count: 'exact', head: true }),
+            supabase.from('jobs').select('*').eq('customer_id', targetUserId).order('created_at', { ascending: false }).limit(5)
+          ])
+
+          setJobsCount(jCount || 0)
+          setCandidatesCount(cCount || 0)
+          setRecentJobs(rJobs || [])
+        }
       }
       setLoading(false)
     }
 
     loadStats()
-  }, [isLoaded, impersonating, impData])
+  }, [isLoaded, impersonating, impData, role, companyId])
 
   if (loading) {
     return (
@@ -50,12 +68,18 @@ export default function CustomerDashboard() {
     )
   }
 
+  const isCompanyAdmin = role === 'company_admin' && !impersonating
+
   return (
     <div className="max-w-7xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Welcome to your Workspace</h1>
-          <p className="text-muted-foreground mt-1 text-sm">Here is a quick overview of your recruitment pipeline.</p>
+          <h1 className="text-3xl font-bold tracking-tight">
+            {isCompanyAdmin ? 'Company Overview' : 'Welcome to your Workspace'}
+          </h1>
+          <p className="text-muted-foreground mt-1 text-sm">
+            {isCompanyAdmin ? 'Manage your team, jobs, and candidates across the company.' : 'Here is a quick overview of your recruitment pipeline.'}
+          </p>
         </div>
         <Link href="/dashboard/jobs">
           <Button className="h-10 hover:shadow-lg transition-all rounded-lg bg-primary text-primary-foreground">
@@ -76,8 +100,12 @@ export default function CustomerDashboard() {
               </div>
               <div>
                 <h3 className="text-4xl font-bold tracking-tighter mb-1">{jobsCount || 0}</h3>
-                <p className="text-sm font-medium text-foreground">Active Job Postings</p>
-                <p className="text-xs text-muted-foreground mt-1">Manage your open positions.</p>
+                <p className="text-sm font-medium text-foreground">
+                  {isCompanyAdmin ? 'Company Jobs' : 'Active Job Postings'}
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {isCompanyAdmin ? 'Jobs across your organization.' : 'Manage your open positions.'}
+                </p>
               </div>
               <div className="absolute -right-4 -bottom-4 opacity-[0.03] group-hover:opacity-[0.05] transition-opacity pointer-events-none">
                  <Briefcase className="w-32 h-32" />
@@ -97,7 +125,9 @@ export default function CustomerDashboard() {
               <div>
                 <h3 className="text-4xl font-bold tracking-tighter mb-1">{candidatesCount || 0}</h3>
                 <p className="text-sm font-medium text-foreground">Total Candidates</p>
-                <p className="text-xs text-muted-foreground mt-1">Review your talent pipeline.</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {isCompanyAdmin ? 'All candidates across company jobs.' : 'Review your talent pipeline.'}
+                </p>
               </div>
               <div className="absolute -right-4 -bottom-4 opacity-[0.03] group-hover:opacity-[0.05] transition-opacity pointer-events-none">
                  <Users className="w-32 h-32" />
@@ -111,7 +141,7 @@ export default function CustomerDashboard() {
         <Card className="col-span-1 lg:col-span-2 border-border/50 shadow-sm flex flex-col">
           <CardHeader className="border-b border-border/50 bg-muted/20">
             <CardTitle>Recent Job Postings</CardTitle>
-            <CardDescription>Your latest recruitment activities</CardDescription>
+            <CardDescription>{isCompanyAdmin ? 'Latest recruitment activity across the company' : 'Your latest recruitment activities'}</CardDescription>
           </CardHeader>
           <CardContent className="p-0 flex-1 flex flex-col">
             {recentJobs && recentJobs.length > 0 ? (
@@ -148,7 +178,9 @@ export default function CustomerDashboard() {
                    <Briefcase className="w-8 h-8 text-muted-foreground" />
                  </div>
                  <h3 className="text-lg font-medium text-foreground">No active jobs</h3>
-                 <p className="text-muted-foreground max-w-sm mt-1">You haven't posted any jobs yet. Create a new posting to start hiring top talent.</p>
+                 <p className="text-muted-foreground max-w-sm mt-1">
+                   {isCompanyAdmin ? 'No jobs have been created in your company yet.' : 'You haven\'t posted any jobs yet. Create a new posting to start hiring top talent.'}
+                 </p>
               </div>
             )}
             <div className="mt-auto border-t border-border/50 p-4 bg-muted/20 text-center">
@@ -183,6 +215,18 @@ export default function CustomerDashboard() {
                   <p className="text-xs text-muted-foreground">Browse all applications</p>
                 </div>
              </Link>
+
+             {isCompanyAdmin && (
+               <Link href="/dashboard/team" className="group flex items-center gap-3 p-4 rounded-xl border border-border/50 hover:border-primary/30 hover:bg-muted/30 transition-all cursor-pointer">
+                  <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center">
+                     <Users className="w-5 h-5 text-emerald-500" />
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="text-sm font-medium text-foreground group-hover:text-primary transition-colors">Manage Team</h4>
+                    <p className="text-xs text-muted-foreground">View & manage members</p>
+                  </div>
+               </Link>
+             )}
           </CardContent>
         </Card>
       </div>

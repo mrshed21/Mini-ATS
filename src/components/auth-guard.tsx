@@ -40,8 +40,8 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
           router.replace('/dashboard')
         }
       } else if (pathname.startsWith('/dashboard') || pathname.startsWith('/jobs')) {
-        // Customer routes -> Must be customer OR an impersonating admin
-        if (role === 'customer' || (role === 'admin' && impersonating)) {
+        // Dashboard routes -> company_admin, customer, or impersonating admin
+        if (role === 'company_admin' || role === 'customer' || (role === 'admin' && impersonating)) {
           setAuthorized(true)
         } else {
           router.replace('/admin/customers')

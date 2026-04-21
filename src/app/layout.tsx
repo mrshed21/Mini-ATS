@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { AuthProvider } from '@/lib/contexts/auth-context'
 import { ImpersonationProvider } from '@/lib/contexts/impersonation-context'
 import AuthGuard from '@/components/auth-guard'
 
@@ -30,11 +31,13 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
       <body className="min-h-full flex flex-col">
-        <ImpersonationProvider>
-          <AuthGuard>
-            {children}
-          </AuthGuard>
-        </ImpersonationProvider>
+        <AuthProvider>
+          <ImpersonationProvider>
+            <AuthGuard>
+              {children}
+            </AuthGuard>
+          </ImpersonationProvider>
+        </AuthProvider>
       </body>
     </html>
   );

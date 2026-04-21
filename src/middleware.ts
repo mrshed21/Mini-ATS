@@ -32,14 +32,14 @@ export async function middleware(request: NextRequest) {
   }
 
   if (user) {
-    // 1. Logged in users visiting /login or / get redirected to their default dashboard
+    // Logged in users visiting /login or / get redirected to their default dashboard
     if (request.nextUrl.pathname === '/login' || request.nextUrl.pathname === '/') {
-       // We'll let the application redirect appropriately via client-side or we can fetch role here just for initial login routing
        const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).single()
        const role = profile?.role || user.user_metadata?.role;
        if (role === 'admin') {
          return NextResponse.redirect(new URL('/admin', request.url))
        } else {
+         // company_admin and customer both go to /dashboard
          return NextResponse.redirect(new URL('/dashboard', request.url))
        }
     }

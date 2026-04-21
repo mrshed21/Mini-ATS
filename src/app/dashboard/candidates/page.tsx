@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { useImpersonation, getEffectiveUserId } from '@/lib/contexts/impersonation-context'
+import { useAuth } from '@/lib/contexts/auth-context'
+import { useImpersonation, getEffectiveUserId, getEffectiveCompanyId } from '@/lib/contexts/impersonation-context'
 import { Candidate, Job } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -19,6 +20,7 @@ import { Search, Mail, Filter, Trash2, Columns, Users, Plus, Pencil } from 'luci
 import CandidateModal from '@/components/candidate-modal'
 
 export default function AllCandidatesPage() {
+  const { role, companyId } = useAuth()
   const { impersonating, data: impData } = useImpersonation()
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
@@ -32,15 +34,33 @@ export default function AllCandidatesPage() {
 
   useEffect(() => {
     loadData()
-  }, [])
+  }, [role, companyId, impersonating])
 
   async function loadData() {
     setLoading(true)
     
     const { data: { user } } = await supabase.auth.getUser()
     const targetUserId = getEffectiveUserId(impersonating, impData, user?.id)
-    
-    if (targetUserId) {
+    const targetCompanyId = getEffectiveCompanyId(impersonating, impData, companyId ?? undefined)
+
+    if (role === 'company_admin' && targetCompanyId && !impersonating) {
+      // Company Admin: fetch all company candidates and jobs
+      const [candidatesData, jobsData] = await Promise.all([
+        supabase
+          .from('candidates')
+          .select('*, jobs!inner(company_id)')
+          .eq('jobs.company_id', targetCompanyId)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('jobs')
+          .select('*')
+          .eq('company_id', targetCompanyId)
+      ])
+      
+      setCandidates(candidatesData.data || [])
+      setJobs(jobsData.data || [])
+    } else if (targetUserId) {
+      // Customer: fetch own jobs and their candidates
       const [candidatesData, jobsData] = await Promise.all([
         supabase
           .from('candidates')
@@ -123,8 +143,14 @@ export default function AllCandidatesPage() {
     <div className="p-8 max-w-7xl mx-auto space-y-8">
       {/* Header */}
       <div className="flex flex-col gap-2">
-        <h1 className="text-3xl font-bold tracking-tight">Talent Pool</h1>
-        <p className="text-muted-foreground mt-1 text-sm">Browse, filter, and manage all your candidates across active jobs.</p>
+        <h1 className="text-3xl font-bold tracking-tight">
+          {role === 'company_admin' && !impersonating ? 'Company Candidates' : 'Talent Pool'}
+        </h1>
+        <p className="text-muted-foreground mt-1 text-sm">
+          {role === 'company_admin' && !impersonating 
+            ? 'All candidates across company job postings.' 
+            : 'Browse, filter, and manage all your candidates across active jobs.'}
+        </p>
       </div>
       
       {/* Search and Filters */}

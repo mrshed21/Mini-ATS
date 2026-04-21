@@ -31,15 +31,14 @@ export default function LoginPage() {
       if (error) throw error
 
       if (data.user) {
-        // Use user metadata for role
         const userRole = data.user.user_metadata?.role
 
         if (userRole === 'admin') {
           window.location.href = '/admin'
-        } else if (userRole === 'customer') {
+        } else if (userRole === 'company_admin' || userRole === 'customer') {
           window.location.href = '/dashboard'
         } else {
-          // Fallback
+          // Fallback: fetch role from profile
           const { data: profile } = await supabase
             .from('profiles')
             .select('role')
@@ -48,7 +47,7 @@ export default function LoginPage() {
 
           if (profile?.role === 'admin') {
             window.location.href = '/admin'
-          } else if (profile?.role === 'customer') {
+          } else if (profile?.role === 'company_admin' || profile?.role === 'customer') {
             window.location.href = '/dashboard'
           } else {
             setError('User profile not found or invalid role')

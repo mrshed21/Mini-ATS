@@ -4,11 +4,11 @@ import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { useImpersonation } from '@/lib/contexts/impersonation-context'
-import { Profile, Company, Job, Candidate, CandidateStatus } from '@/lib/types'
+import { Profile, Company, Job, Candidate, CandidateStatus, UserRole } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Card, CardContent } from '@/components/ui/card'
+import { Card } from '@/components/ui/card'
 import {
   Dialog,
   DialogContent,
@@ -17,8 +17,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { 
-  Building2, Users, Search, Plus, Trash2, Pencil,
-  Mail, ArrowLeft, Briefcase, Globe, MapPin, Building,
+  Building2, Users, Plus, Trash2, Pencil,
+  ArrowLeft, Briefcase, Globe, MapPin, Building,
   ChevronDown, ChevronUp, CheckCircle, ShieldAlert
 } from 'lucide-react'
 
@@ -54,7 +54,7 @@ export default function CompanyDetailsPage() {
   const [newEmail, setNewEmail] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newFullName, setNewFullName] = useState('')
-  const [newRole, setNewRole] = useState<'admin' | 'customer'>('customer')
+  const [newRole, setNewRole] = useState<UserRole>('customer')
   const [userError, setUserError] = useState('')
   const [isSavingUser, setIsSavingUser] = useState(false)
 
@@ -125,8 +125,8 @@ export default function CompanyDetailsPage() {
       if (error) throw error
       setIsEditCompanyOpen(false)
       loadData()
-    } catch (e: any) {
-      setCompError(e?.message || 'Failed to update company')
+    } catch (e: unknown) {
+      setCompError(e instanceof Error ? e.message : 'Failed to update company')
     }
   }
 
@@ -150,6 +150,8 @@ export default function CompanyDetailsPage() {
   async function handleCreateUser() {
     setUserError('')
     if (!newEmail || !newPassword) return setUserError('Email and password required')
+    // Reject system-level admin role in company context
+    if (newRole === 'admin') return setUserError('Cannot assign system admin role to a company user. Use company_admin or customer.')
 
     setIsSavingUser(true)
     try {
@@ -181,8 +183,8 @@ export default function CompanyDetailsPage() {
         setIsCreateUserOpen(false)
         loadData()
       }
-    } catch (e: any) {
-      setUserError(e?.message || 'Failed to create user')
+    } catch (e: unknown) {
+      setUserError(e instanceof Error ? e.message : 'Failed to create user')
     } finally {
       setIsSavingUser(false)
     }
@@ -190,6 +192,9 @@ export default function CompanyDetailsPage() {
 
   async function handleUpdateUser() {
     setUserError('')
+    // Reject system-level admin role in company context
+    if (newRole === 'admin') return setUserError('Cannot assign system admin role to a company user. Use company_admin or customer.')
+    
     setIsSavingUser(true)
     try {
       const { error } = await supabase.from('profiles').update({
@@ -201,8 +206,8 @@ export default function CompanyDetailsPage() {
       if (error) throw error
       setIsEditUserOpen(false)
       loadData()
-    } catch (e: any) {
-      setUserError(e?.message || 'Failed to update user')
+    } catch (e: unknown) {
+      setUserError(e instanceof Error ? e.message : 'Failed to update user')
     } finally {
       setIsSavingUser(false)
     }
@@ -332,9 +337,11 @@ export default function CompanyDetailsPage() {
                            </td>
                            <td className="px-4 py-3">
                              {profile.role === 'admin' ? (
-                               <span className="inline-flex items-center gap-1 text-xs font-medium text-destructive"><ShieldAlert className="w-3 h-3"/> Admin</span>
+                               <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600"><ShieldAlert className="w-3 h-3"/> System Admin</span>
+                             ) : profile.role === 'company_admin' ? (
+                               <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600"><CheckCircle className="w-3 h-3"/> Company Admin</span>
                              ) : (
-                               <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600"><CheckCircle className="w-3 h-3"/> Customer</span>
+                               <span className="inline-flex items-center gap-1 text-xs font-medium text-blue-600"><CheckCircle className="w-3 h-3"/> Customer</span>
                              )}
                            </td>
                            <td className="px-4 py-3 text-right">
@@ -343,7 +350,8 @@ export default function CompanyDetailsPage() {
                                   userId: profile.id,
                                   userEmail: profile.email,
                                   userName: profile.full_name || 'User',
-                                  companyId: profile.company_id || ''
+                                  companyId: profile.company_id || '',
+                                  role: profile.role,
                                 })
                                 router.push('/dashboard')
                              }}>
@@ -522,9 +530,9 @@ export default function CompanyDetailsPage() {
             <div className="space-y-2"><Label>Password</Label><Input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="•••••••••" /></div>
             <div className="space-y-2">
               <Label>Role</Label>
-              <select value={newRole} onChange={e => setNewRole(e.target.value as any)} className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus:ring-1 focus:ring-primary/50">
+              <select value={newRole} onChange={e => setNewRole(e.target.value as UserRole)} className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus:ring-1 focus:ring-primary/50">
                 <option value="customer">Customer</option>
-                <option value="admin">Admin</option>
+                <option value="company_admin">Company Admin</option>
               </select>
             </div>
             {userError && <p className="text-sm text-destructive">{userError}</p>}
@@ -540,9 +548,9 @@ export default function CompanyDetailsPage() {
             <div className="space-y-2"><Label>Full Name</Label><Input value={newFullName} onChange={e => setNewFullName(e.target.value)} /></div>
             <div className="space-y-2">
               <Label>Role</Label>
-              <select value={newRole} onChange={e => setNewRole(e.target.value as any)} className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus:ring-1 focus:ring-primary/50">
+              <select value={newRole} onChange={e => setNewRole(e.target.value as UserRole)} className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus:ring-1 focus:ring-primary/50">
                 <option value="customer">Customer</option>
-                <option value="admin">Admin</option>
+                <option value="company_admin">Company Admin</option>
               </select>
             </div>
             {userError && <p className="text-sm text-destructive">{userError}</p>}

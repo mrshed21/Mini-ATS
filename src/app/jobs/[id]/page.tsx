@@ -4,6 +4,8 @@ import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { Candidate, CandidateStatus, Job, Note } from '@/lib/types'
+import { logActivityAuto } from '@/lib/audit'
+import { useImpersonation } from '@/lib/contexts/impersonation-context'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -51,6 +53,7 @@ export default function JobCandidatesKanbanPage() {
   const [error, setError] = useState('')
   
   const supabase = createClient()
+  const { impersonating, data: impData } = useImpersonation()
 
   useEffect(() => {
     setIsMounted(true)
@@ -99,9 +102,20 @@ export default function JobCandidatesKanbanPage() {
 
   async function handleDeleteCandidate(id: string) {
     if (!confirm('Are you sure you want to delete this candidate?')) return
+    const candidateName = candidates.find(c => c.id === id)?.full_name
     try {
       const { error } = await supabase.from('candidates').delete().eq('id', id)
       if (error) throw error
+      await logActivityAuto(supabase, {
+        action: 'delete',
+        entityType: 'candidate',
+        entityId: id,
+        entityName: candidateName,
+        companyId: job?.company_id,
+        impersonating,
+        impersonatedId: impData?.userId,
+        impersonatedName: impData?.userName,
+      })
       loadCandidates()
       setIsNotesDialogOpen(false)
     } catch (error) {
@@ -115,8 +129,10 @@ export default function JobCandidatesKanbanPage() {
     const { source, destination, draggableId } = result
     if (source.droppableId === destination.droppableId && source.index === destination.index) return
 
+    const oldStatus = source.droppableId as CandidateStatus
     const newStatus = destination.droppableId as CandidateStatus
-    
+    const movedCandidate = candidates.find(c => c.id === draggableId)
+
     // Optimistic UI update
     setCandidates((prev) => 
       prev.map(c => c.id === draggableId ? { ...c, status: newStatus } : c)
@@ -129,6 +145,19 @@ export default function JobCandidatesKanbanPage() {
         .eq('id', draggableId)
 
       if (error) throw error
+
+      await logActivityAuto(supabase, {
+        action: 'stage_change',
+        entityType: 'candidate',
+        entityId: draggableId,
+        entityName: movedCandidate?.full_name,
+        oldValue: { status: oldStatus },
+        newValue: { status: newStatus },
+        companyId: job?.company_id,
+        impersonating,
+        impersonatedId: impData?.userId,
+        impersonatedName: impData?.userName,
+      })
     } catch (error) {
       loadCandidates() // revert
       alert('Failed to update applicant stage')
@@ -140,6 +169,17 @@ export default function JobCandidatesKanbanPage() {
     try {
       const { error } = await supabase.from('notes').insert([{ candidate_id: selectedCandidate.id, content: newNote.trim() }])
       if (error) throw error
+      await logActivityAuto(supabase, {
+        action: 'note_added',
+        entityType: 'note',
+        entityId: selectedCandidate.id,
+        entityName: selectedCandidate.full_name,
+        newValue: { preview: newNote.trim().substring(0, 80) },
+        companyId: job?.company_id,
+        impersonating,
+        impersonatedId: impData?.userId,
+        impersonatedName: impData?.userName,
+      })
       setNewNote('')
       loadCandidateNotes(selectedCandidate.id)
     } catch (error) {

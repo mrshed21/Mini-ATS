@@ -1,4 +1,24 @@
-export type UserRole = 'admin' | 'customer'
+export type UserRole = 'admin' | 'company_admin' | 'customer'
+
+export type ActivityAction =
+  | 'create'
+  | 'update'
+  | 'delete'
+  | 'stage_change'
+  | 'note_added'
+  | 'group_assigned'
+  | 'job_reassigned'
+  | 'impersonation_start'
+  | 'impersonation_end'
+
+export type EntityType =
+  | 'job'
+  | 'candidate'
+  | 'note'
+  | 'profile'
+  | 'group'
+  | 'job_access'
+  | 'session'
 
 export interface Company {
   id: string
@@ -34,6 +54,7 @@ export interface Job {
   salary_range?: string
   status: JobStatus
   customer_id: string
+  company_id?: string
   customer?: Profile
   created_at: string
   updated_at: string
@@ -62,6 +83,50 @@ export interface Note {
   id: string
   candidate_id: string
   content: string
+  created_at: string
+}
+
+export interface JobGroup {
+  id: string
+  name: string
+  company_id: string
+  created_by: string
+  created_at: string
+  members?: JobGroupMember[]
+}
+
+export interface JobGroupMember {
+  id: string
+  group_id: string
+  user_id: string
+  added_by: string
+  added_at: string
+  profile?: Profile
+}
+
+export interface JobAccess {
+  id: string
+  job_id: string
+  group_id: string
+  granted_by: string
+  granted_at: string
+  group?: JobGroup
+}
+
+export interface ActivityLog {
+  id: string
+  actor_id: string
+  actor_name: string
+  actor_role: string
+  on_behalf_of_id?: string
+  on_behalf_of_name?: string
+  action: ActivityAction
+  entity_type: EntityType
+  entity_id?: string
+  entity_name?: string
+  old_value?: Record<string, unknown>
+  new_value?: Record<string, unknown>
+  company_id?: string
   created_at: string
 }
 

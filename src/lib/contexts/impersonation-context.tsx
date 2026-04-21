@@ -1,12 +1,13 @@
 'use client'
 
-import React, { createContext, useContext, useState, useEffect } from 'react'
+import React, { createContext, useContext, useState } from 'react'
 
 export interface ImpersonationData {
   userId: string
   userEmail: string
   userName: string
   companyId: string
+  role: string
   isAdmin?: boolean
   impersonating?: boolean
 }
@@ -21,24 +22,24 @@ interface ImpersonationState {
 
 const ImpersonationContext = createContext<ImpersonationState | undefined>(undefined)
 
-export function ImpersonationProvider({ children }: { children: React.ReactNode }) {
-  const [impersonating, setImpersonating] = useState(false)
-  const [data, setData] = useState<ImpersonationData | null>(null)
-  const [isLoaded, setIsLoaded] = useState(false)
-  
-  useEffect(() => {
-    const stored = localStorage.getItem('ats_impersonation')
-    if (stored) {
-      try {
-        const parsedData = JSON.parse(stored)
-        setData(parsedData)
-        setImpersonating(true)
-      } catch (e) {
-        localStorage.removeItem('ats_impersonation')
-      }
+function getStoredImpersonation(): { data: ImpersonationData | null; impersonating: boolean } {
+  if (typeof window === 'undefined') return { data: null, impersonating: false }
+  const stored = localStorage.getItem('ats_impersonation')
+  if (stored) {
+    try {
+      return { data: JSON.parse(stored), impersonating: true }
+    } catch {
+      localStorage.removeItem('ats_impersonation')
     }
-    setIsLoaded(true)
-  }, [])
+  }
+  return { data: null, impersonating: false }
+}
+
+export function ImpersonationProvider({ children }: { children: React.ReactNode }) {
+  const [state] = useState(getStoredImpersonation)
+  const [impersonating, setImpersonating] = useState(state.impersonating)
+  const [data, setData] = useState<ImpersonationData | null>(state.data)
+  const isLoaded = true
 
   function setImpersonation(newData: ImpersonationData) {
     const enrichedData = { ...newData, isAdmin: true, impersonating: true }

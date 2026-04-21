@@ -3,7 +3,9 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { useImpersonation, getEffectiveUserId } from '@/lib/contexts/impersonation-context'
+import { useAuth } from '@/lib/contexts/auth-context'
+import { useImpersonation, getEffectiveUserId, getEffectiveCompanyId } from '@/lib/contexts/impersonation-context'
+import { logActivityAuto } from '@/lib/audit'
 import { Job, JobType } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -20,11 +22,12 @@ import {
 import Link from 'next/link'
 import { 
   Plus, MoreVertical, MapPin, Banknote, Clock, 
-  Briefcase, Trash2, ArrowRight, Columns, PlayCircle
+  Briefcase, Trash2, ArrowRight, Columns, PlayCircle, Users2
 } from 'lucide-react'
 
 export default function JobsPage() {
   const router = useRouter()
+  const { role, companyId } = useAuth()
   const { impersonating, data: impData } = useImpersonation()
   const [jobs, setJobs] = useState<Job[]>([])
   const [loading, setLoading] = useState(true)
@@ -37,23 +40,38 @@ export default function JobsPage() {
   const [newSalaryRange, setNewSalaryRange] = useState('')
   const [error, setError] = useState('')
   const [isCreating, setIsCreating] = useState(false)
+  // Track logged-in user id for shared-job detection
+  const [myUserId, setMyUserId] = useState<string | null>(null)
 
   const supabase = createClient()
 
   useEffect(() => {
-    loadJobs()
+    supabase.auth.getUser().then(({ data: { user } }) => setMyUserId(user?.id ?? null))
   }, [])
+
+  useEffect(() => {
+    loadJobs()
+  }, [role, companyId, impersonating])
 
   async function loadJobs() {
     setLoading(true)
     const { data: { user } } = await supabase.auth.getUser()
     const targetUserId = getEffectiveUserId(impersonating, impData, user?.id)
-    
-    if (targetUserId) {
+    const targetCompanyId = getEffectiveCompanyId(impersonating, impData, companyId ?? undefined)
+
+    if (role === 'company_admin' && targetCompanyId && !impersonating) {
+      // Company Admin: all company jobs
       const { data } = await supabase
         .from('jobs')
         .select('*, customer:profiles(*)')
-        .eq('customer_id', targetUserId)
+        .eq('company_id', targetCompanyId)
+        .order('created_at', { ascending: false })
+      setJobs(data || [])
+    } else if (targetUserId) {
+      // Customer: own jobs + shared-via-group jobs (RLS handles the union)
+      const { data } = await supabase
+        .from('jobs')
+        .select('*, customer:profiles(*)')
         .order('created_at', { ascending: false })
       setJobs(data || [])
     }
@@ -66,21 +84,83 @@ export default function JobsPage() {
 
     setIsCreating(true)
     try {
+      // 1. Get current authenticated user
       const { data: { user } } = await supabase.auth.getUser()
-      const targetUserId = getEffectiveUserId(impersonating, impData, user?.id)
-      if (!targetUserId) throw new Error('User not authenticated')
+      if (!user) throw new Error('User not authenticated. Please log in again.')
 
-      const { error } = await supabase.from('jobs').insert([{
+      // 2. Determine customer_id (effective user, supports impersonation)
+      const targetUserId = getEffectiveUserId(impersonating, impData, user.id)
+      if (!targetUserId) throw new Error('Unable to determine user identity. Please refresh the page.')
+
+      // 3. Resolve company_id: try auth context first, then query profiles as fallback
+      let resolvedCompanyId = getEffectiveCompanyId(impersonating, impData, companyId ?? undefined) ?? null
+
+      if (!resolvedCompanyId) {
+        const { data: profileData } = await supabase
+          .from('profiles')
+          .select('company_id')
+          .eq('id', targetUserId)
+          .single()
+        resolvedCompanyId = profileData?.company_id ?? null
+      }
+
+      // 4. Build the insert payload with all required fields, no undefined values
+      const jobData: Record<string, unknown> = {
         title: newTitle,
         description: newDescription,
-        location: newLocation || undefined,
+        location: newLocation || null,
         job_type: newJobType,
-        salary_range: newSalaryRange || undefined,
+        salary_range: newSalaryRange || null,
+        status: 'active',
         customer_id: targetUserId,
-      }])
+        company_id: resolvedCompanyId,
+      }
 
-      if (error) throw error
+      // 5. Insert the job
+      const { data: created, error } = await supabase.from('jobs').insert([jobData]).select().single()
 
+      if (error) {
+        // Handle specific database constraint errors with clear messages
+        const pgCode = (error as { code?: string }).code
+        const pgMessage = error.message || ''
+
+        if (pgCode === '23503') {
+          // Foreign key violation
+          if (pgMessage.includes('customer_id')) {
+            throw new Error('Your user profile could not be verified. Please ensure your account is properly set up.')
+          }
+          if (pgMessage.includes('company_id')) {
+            throw new Error('Company not found. Please ensure you are assigned to a valid company.')
+          }
+          throw new Error('Data integrity error: a related record could not be found. Please contact support.')
+        }
+
+        if (pgCode === '23502') {
+          // Not-null violation
+          throw new Error('Required field is missing. Please fill in all mandatory fields.')
+        }
+
+        if (pgCode === '23514') {
+          // Check constraint violation (e.g., status must be 'active' or 'closed')
+          throw new Error('Invalid data value. Please check your input and try again.')
+        }
+
+        throw new Error(pgMessage || 'Failed to create job posting.')
+      }
+
+      // 6. Log the activity
+      await logActivityAuto(supabase, {
+        action: 'create',
+        entityType: 'job',
+        entityId: created?.id,
+        entityName: newTitle,
+        companyId: resolvedCompanyId,
+        impersonating,
+        impersonatedId: impData?.userId,
+        impersonatedName: impData?.userName,
+      })
+
+      // 7. Reset form and close dialog
       setNewTitle(''); setNewDescription(''); setNewLocation(''); setNewJobType('Full-time'); setNewSalaryRange('');
       setIsCreateDialogOpen(false)
       loadJobs()
@@ -91,10 +171,20 @@ export default function JobsPage() {
     }
   }
 
-  async function handleDeleteJob(id: string) {
+  async function handleDeleteJob(id: string, title?: string) {
     if (!confirm('Are you sure you want to delete this job and all associated candidates?')) return
     try {
       await supabase.from('jobs').delete().eq('id', id)
+      await logActivityAuto(supabase, {
+        action: 'delete',
+        entityType: 'job',
+        entityId: id,
+        entityName: title,
+        companyId: companyId,
+        impersonating,
+        impersonatedId: impData?.userId,
+        impersonatedName: impData?.userName,
+      })
       loadJobs()
     } catch (error) {
       alert('Failed to delete job')
@@ -106,8 +196,14 @@ export default function JobsPage() {
       {/* Header */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Job Postings</h1>
-          <p className="text-muted-foreground mt-1 text-sm">Create, manage, and track your active recruitment campaigns.</p>
+          <h1 className="text-3xl font-bold tracking-tight">
+            {role === 'company_admin' && !impersonating ? 'Company Jobs' : 'Job Postings'}
+          </h1>
+          <p className="text-muted-foreground mt-1 text-sm">
+            {role === 'company_admin' && !impersonating 
+              ? 'All jobs across your organization.' 
+              : 'Create, manage, and track your active recruitment campaigns.'}
+          </p>
         </div>
         <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
           <DialogTrigger asChild>
@@ -170,7 +266,7 @@ export default function JobsPage() {
                 <Briefcase className="w-8 h-8 text-muted-foreground" />
               </div>
               <h3 className="text-xl font-medium text-foreground">No active postings</h3>
-              <p className="text-muted-foreground mt-2 max-w-sm mx-auto">Click "Create Job" to set up your first requisition and begin recruiting.</p>
+              <p className="text-muted-foreground mt-2 max-w-sm mx-auto">{`Click "Create Job" to set up your first requisition and begin recruiting.`}</p>
             </div>
           ) : (
             jobs.map((job) => (
@@ -187,7 +283,7 @@ export default function JobsPage() {
                         <Briefcase className="w-6 h-6 text-primary" />
                       </div>
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                         <Button variant="ghost" size="icon" className="w-8 h-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10" onClick={(e) => { e.stopPropagation(); handleDeleteJob(job.id); }}>
+                         <Button variant="ghost" size="icon" className="w-8 h-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10" onClick={(e) => { e.stopPropagation(); handleDeleteJob(job.id, job.title); }}>
                             <Trash2 className="w-4 h-4" />
                          </Button>
                       </div>
@@ -206,6 +302,11 @@ export default function JobsPage() {
                           <Clock className="w-3 h-3" />
                           {job.job_type}
                        </span>
+                       {myUserId && job.customer_id !== myUserId && (
+                         <span className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-cyan-600 bg-cyan-500/10 rounded-md border border-cyan-500/20">
+                           <Users2 className="w-3 h-3" /> Shared
+                         </span>
+                       )}
                     </div>
                   </div>
 

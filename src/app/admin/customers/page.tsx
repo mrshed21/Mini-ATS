@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useMemo } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { Profile, Company } from '@/lib/types'
 import { Button } from '@/components/ui/button'
@@ -16,14 +16,59 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import { useImpersonation } from '@/lib/contexts/impersonation-context'
 import { 
   Building2, Users, Search, Plus, Trash2, Pencil,
-  Mail, Phone, ShieldAlert, LayoutGrid, LayoutList,
-  UserCheck, Building, Globe, MapPin, Briefcase
+  Mail, ShieldAlert, UserCheck, Building, MapPin, Briefcase, Eye
 } from 'lucide-react'
+
+// ─── Validation helpers ───────────────────────────────────
+interface FieldErrors {
+  [key: string]: string
+}
+
+function validateEmail(email: string): string | null {
+  if (!email) return 'Email is required'
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+  if (!re.test(email)) return 'Invalid email format'
+  return null
+}
+
+function validatePassword(password: string): string | null {
+  if (!password) return 'Password is required'
+  if (password.length < 6) return 'Must be at least 6 characters'
+  return null
+}
+
+function validateRequired(value: string, label: string): string | null {
+  if (!value.trim()) return `${label} is required`
+  return null
+}
+
+function validateUrl(url: string): string | null {
+  if (!url) return null // optional field
+  try {
+    new URL(url)
+    return null
+  } catch {
+    return 'Invalid URL format (e.g. https://example.com)'
+  }
+}
+
+// ─── Error Input Wrapper ──────────────────────────────────
+function FieldWrapper({ error, children }: { error?: string | null; children: React.ReactNode }) {
+  return (
+    <div>
+      {children}
+      {error && <p className="text-xs text-destructive mt-1.5 flex items-center gap-1"><span className="inline-block w-1 h-1 rounded-full bg-destructive" />{error}</p>}
+    </div>
+  )
+}
 
 export default function AdminCustomersPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const { setImpersonation } = useImpersonation()
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [companies, setCompanies] = useState<Company[]>([])
   const [loading, setLoading] = useState(true)
@@ -43,10 +88,15 @@ export default function AdminCustomersPage() {
   const [newEmail, setNewEmail] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newFullName, setNewFullName] = useState('')
-  const [newRole, setNewRole] = useState<'admin' | 'customer'>('customer')
+  const [newRole, setNewRole] = useState<'admin' | 'company_admin' | 'customer'>('customer')
   const [selectedCompanyId, setSelectedCompanyId] = useState('')
   const [userError, setUserError] = useState('')
   const [isCreatingUser, setIsCreatingUser] = useState(false)
+
+  // Per-field validation errors for user form
+  const [userFieldErrors, setUserFieldErrors] = useState<FieldErrors>({})
+  // Track touched fields for blur-based validation
+  const [userTouchedFields, setUserTouchedFields] = useState<Set<string>>(new Set())
 
   // Company creation state
   const [newCompanyName, setNewCompanyName] = useState('')
@@ -58,7 +108,96 @@ export default function AdminCustomersPage() {
   const [companyError, setCompanyError] = useState('')
   const [isCreatingCompany, setIsCreatingCompany] = useState(false)
 
+  // Per-field validation errors for company form
+  const [companyFieldErrors, setCompanyFieldErrors] = useState<FieldErrors>({})
+  const [companyTouchedFields, setCompanyTouchedFields] = useState<Set<string>>(new Set())
+
   const supabase = createClient()
+
+  // ─── Handle query params ────────────────────────────────
+  useEffect(() => {
+    const create = searchParams.get('create')
+    const tab = searchParams.get('tab')
+
+    if (tab === 'users') {
+      setActiveTab('users')
+    }
+
+    if (create === 'company') {
+      resetCompanyForm()
+      setIsCreateCompanyDialogOpen(true)
+      // Clean URL without re-render
+      window.history.replaceState({}, '', '/admin/customers')
+    } else if (create === 'user') {
+      resetUserForm()
+      setIsCreateUserDialogOpen(true)
+      window.history.replaceState({}, '', '/admin/customers')
+    }
+  }, [searchParams])
+
+  // ─── User field validation on blur ──────────────────────
+  function validateUserField(field: string, value: string) {
+    let error: string | null = null
+    switch (field) {
+      case 'email':
+        error = validateEmail(value)
+        break
+      case 'password':
+        error = validatePassword(value)
+        break
+      case 'company':
+        if ((newRole === 'customer' || newRole === 'company_admin') && !value) {
+          error = 'Please select a company'
+        }
+        break
+    }
+    setUserFieldErrors(prev => {
+      const next = { ...prev }
+      if (error) next[field] = error
+      else delete next[field]
+      return next
+    })
+  }
+
+  function handleUserFieldBlur(field: string) {
+    setUserTouchedFields(prev => new Set(prev).add(field))
+    let value = ''
+    switch (field) {
+      case 'email': value = newEmail; break
+      case 'password': value = newPassword; break
+      case 'company': value = selectedCompanyId; break
+    }
+    validateUserField(field, value)
+  }
+
+  // ─── Company field validation on blur ───────────────────
+  function validateCompanyField(field: string, value: string) {
+    let error: string | null = null
+    switch (field) {
+      case 'name':
+        error = validateRequired(value, 'Company name')
+        break
+      case 'website_url':
+        error = validateUrl(value)
+        break
+    }
+    setCompanyFieldErrors(prev => {
+      const next = { ...prev }
+      if (error) next[field] = error
+      else delete next[field]
+      return next
+    })
+  }
+
+  function handleCompanyFieldBlur(field: string) {
+    setCompanyTouchedFields(prev => new Set(prev).add(field))
+    let value = ''
+    switch (field) {
+      case 'name': value = newCompanyName; break
+      case 'website_url': value = newWebsiteUrl; break
+    }
+    validateCompanyField(field, value)
+  }
 
   function handleEditCompanyClick(company: Company) {
     setEditingCompanyId(company.id)
@@ -69,6 +208,8 @@ export default function AdminCustomersPage() {
     setNewDescription(company.description || '')
     setNewCompanySize(company.company_size || '1-10')
     setCompanyError('')
+    setCompanyFieldErrors({})
+    setCompanyTouchedFields(new Set())
     setIsEditCompanyDialogOpen(true)
   }
 
@@ -78,17 +219,23 @@ export default function AdminCustomersPage() {
     setNewRole(profile.role)
     setSelectedCompanyId(profile.company_id || '')
     setUserError('')
+    setUserFieldErrors({})
+    setUserTouchedFields(new Set())
     setIsEditUserDialogOpen(true)
   }
 
   function resetCompanyForm() {
     setNewCompanyName(''); setNewWebsiteUrl(''); setNewIndustry(''); 
     setNewLocation(''); setNewDescription(''); setNewCompanySize('1-10');
+    setCompanyFieldErrors({})
+    setCompanyTouchedFields(new Set())
   }
 
   function resetUserForm() {
     setNewEmail(''); setNewPassword(''); setNewFullName(''); 
     setNewRole('customer'); setSelectedCompanyId('');
+    setUserFieldErrors({})
+    setUserTouchedFields(new Set())
   }
 
   useEffect(() => {
@@ -112,9 +259,48 @@ export default function AdminCustomersPage() {
     setLoading(false)
   }
 
+  // ─── Full validation before submit ──────────────────────
+  function validateAllUserFields(): boolean {
+    const errors: FieldErrors = {}
+    
+    const emailErr = validateEmail(newEmail)
+    if (emailErr) errors.email = emailErr
+
+    const passErr = validatePassword(newPassword)
+    if (passErr) errors.password = passErr
+
+    // Reject system admin when a company is assigned
+    if (newRole === 'admin' && selectedCompanyId) {
+      errors.company = 'System admin cannot be assigned to a company. Use company_admin instead.'
+    }
+
+    if ((newRole === 'customer' || newRole === 'company_admin') && !selectedCompanyId) {
+      errors.company = 'Please select a company'
+    }
+
+    setUserFieldErrors(errors)
+    setUserTouchedFields(new Set(['email', 'password', 'company']))
+    return Object.keys(errors).length === 0
+  }
+
+  function validateAllCompanyFields(): boolean {
+    const errors: FieldErrors = {}
+
+    const nameErr = validateRequired(newCompanyName, 'Company name')
+    if (nameErr) errors.name = nameErr
+
+    const urlErr = validateUrl(newWebsiteUrl)
+    if (urlErr) errors.website_url = urlErr
+
+    setCompanyFieldErrors(errors)
+    setCompanyTouchedFields(new Set(['name', 'website_url']))
+    return Object.keys(errors).length === 0
+  }
+
+  // ─── Handlers ───────────────────────────────────────────
   async function handleCreateCompany() {
     setCompanyError('')
-    if (!newCompanyName) return setCompanyError('Company name is required')
+    if (!validateAllCompanyFields()) return
 
     setIsCreatingCompany(true)
     try {
@@ -130,8 +316,8 @@ export default function AdminCustomersPage() {
       resetCompanyForm()
       setIsCreateCompanyDialogOpen(false)
       loadData()
-    } catch (error: any) {
-      setCompanyError(error?.message || 'Failed to create company')
+    } catch (error: unknown) {
+      setCompanyError(error instanceof Error ? error.message : 'Failed to create company')
     } finally {
       setIsCreatingCompany(false)
     }
@@ -139,7 +325,7 @@ export default function AdminCustomersPage() {
 
   async function handleUpdateCompany() {
     setCompanyError('')
-    if (!newCompanyName) return setCompanyError('Company name is required')
+    if (!validateAllCompanyFields()) return
 
     setIsCreatingCompany(true)
     try {
@@ -155,8 +341,8 @@ export default function AdminCustomersPage() {
       resetCompanyForm()
       setIsEditCompanyDialogOpen(false)
       loadData()
-    } catch (error: any) {
-      setCompanyError(error?.message || 'Failed to update company')
+    } catch (error: unknown) {
+      setCompanyError(error instanceof Error ? error.message : 'Failed to update company')
     } finally {
       setIsCreatingCompany(false)
     }
@@ -164,8 +350,7 @@ export default function AdminCustomersPage() {
 
   async function handleCreateUser() {
     setUserError('')
-    if (!newEmail || !newPassword) return setUserError('Email and password are required')
-    if (newRole === 'customer' && !selectedCompanyId) return setUserError('Please select a company')
+    if (!validateAllUserFields()) return
 
     setIsCreatingUser(true)
     try {
@@ -185,7 +370,7 @@ export default function AdminCustomersPage() {
 
       if (authError) {
         if (authError.message.includes('already registered')) {
-          setUserError('Email already exists.')
+          setUserFieldErrors(prev => ({ ...prev, email: 'Email already exists' }))
           setIsCreatingUser(false)
           return
         }
@@ -195,11 +380,11 @@ export default function AdminCustomersPage() {
       if (authData.user) {
         const profileData: Partial<Profile> = {
           id: authData.user.id,
-          email: newEmail, // Ensure this column is added to Supabase DB!
+          email: newEmail,
           role: newRole,
           full_name: newFullName
         }
-        if (newRole === 'customer' && selectedCompanyId) {
+        if ((newRole === 'customer' || newRole === 'company_admin') && selectedCompanyId) {
           profileData.company_id = selectedCompanyId
         }
 
@@ -216,8 +401,8 @@ export default function AdminCustomersPage() {
         setIsCreateUserDialogOpen(false)
         loadData()
       }
-    } catch (error: any) {
-      setUserError(error?.message || 'Failed to create user')
+    } catch (error: unknown) {
+      setUserError(error instanceof Error ? error.message : 'Failed to create user')
     } finally {
       setIsCreatingUser(false)
     }
@@ -225,14 +410,20 @@ export default function AdminCustomersPage() {
 
   async function handleUpdateUser() {
     setUserError('')
-    if (newRole === 'customer' && !selectedCompanyId) return setUserError('Please select a company')
+    // Validate company selection for update
+    const errors: FieldErrors = {}
+    if ((newRole === 'customer' || newRole === 'company_admin') && !selectedCompanyId) {
+      errors.company = 'Please select a company'
+    }
+    setUserFieldErrors(errors)
+    if (Object.keys(errors).length > 0) return
 
     setIsCreatingUser(true)
     try {
       const profileData: Partial<Profile> = {
         role: newRole,
         full_name: newFullName,
-        company_id: newRole === 'customer' ? selectedCompanyId : null
+        company_id: (newRole === 'customer' || newRole === 'company_admin') ? selectedCompanyId || undefined : undefined,
       }
 
       const { error } = await supabase.from('profiles').update(profileData).eq('id', editingUserId)
@@ -241,8 +432,8 @@ export default function AdminCustomersPage() {
       resetUserForm()
       setIsEditUserDialogOpen(false)
       loadData()
-    } catch (error: any) {
-      setUserError(error?.message || 'Failed to update user')
+    } catch (error: unknown) {
+      setUserError(error instanceof Error ? error.message : 'Failed to update user')
     } finally {
       setIsCreatingUser(false)
     }
@@ -282,6 +473,10 @@ export default function AdminCustomersPage() {
     [profiles, searchQuery]
   )
 
+  // Helper for input error styling
+  const inputErrorClass = (field: string, errors: FieldErrors) =>
+    errors[field] ? 'border-destructive focus-visible:ring-destructive/30' : ''
+
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
       {/* Header */}
@@ -291,7 +486,7 @@ export default function AdminCustomersPage() {
           <p className="text-muted-foreground mt-1 text-sm">Manage companies and access controls across your platform.</p>
         </div>
         <div className="flex gap-3 w-full md:w-auto">
-          <Dialog open={isCreateCompanyDialogOpen} onOpenChange={setIsCreateCompanyDialogOpen}>
+          <Dialog open={isCreateCompanyDialogOpen} onOpenChange={(open) => { setIsCreateCompanyDialogOpen(open); if (!open) { resetCompanyForm(); setCompanyError(''); } }}>
             <DialogTrigger asChild>
               <Button variant="outline" className="h-10 hover:bg-muted/50 transition-colors">
                 <Building2 className="w-4 h-4 mr-2" />
@@ -304,10 +499,16 @@ export default function AdminCustomersPage() {
                 <DialogDescription>Create a comprehensive company workspace profile.</DialogDescription>
               </DialogHeader>
               <div className="grid gap-6 pt-4">
-                <div className="space-y-2">
+                <FieldWrapper error={companyTouchedFields.has('name') ? companyFieldErrors.name : null}>
                   <Label>Company Name <span className="text-destructive">*</span></Label>
-                  <Input value={newCompanyName} onChange={e => setNewCompanyName(e.target.value)} placeholder="e.g. Spotify AB" className="bg-muted/50" />
-                </div>
+                  <Input 
+                    value={newCompanyName} 
+                    onChange={e => setNewCompanyName(e.target.value)} 
+                    onBlur={() => handleCompanyFieldBlur('name')}
+                    placeholder="e.g. Spotify AB" 
+                    className={`bg-muted/50 ${inputErrorClass('name', companyFieldErrors)}`} 
+                  />
+                </FieldWrapper>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -334,10 +535,16 @@ export default function AdminCustomersPage() {
                     <Label>Location</Label>
                     <Input value={newLocation} onChange={e => setNewLocation(e.target.value)} placeholder="e.g. Stockholm, Sweden" className="bg-muted/50" />
                   </div>
-                  <div className="space-y-2">
+                  <FieldWrapper error={companyTouchedFields.has('website_url') ? companyFieldErrors.website_url : null}>
                     <Label>Website URL</Label>
-                    <Input value={newWebsiteUrl} onChange={e => setNewWebsiteUrl(e.target.value)} placeholder="e.g. https://spotify.com" className="bg-muted/50" />
-                  </div>
+                    <Input 
+                      value={newWebsiteUrl} 
+                      onChange={e => setNewWebsiteUrl(e.target.value)} 
+                      onBlur={() => handleCompanyFieldBlur('website_url')}
+                      placeholder="e.g. https://spotify.com" 
+                      className={`bg-muted/50 ${inputErrorClass('website_url', companyFieldErrors)}`} 
+                    />
+                  </FieldWrapper>
                 </div>
 
                 <div className="space-y-2">
@@ -350,7 +557,7 @@ export default function AdminCustomersPage() {
                   />
                 </div>
                 
-                {companyError && <p className="text-sm text-destructive font-medium">{companyError}</p>}
+                {companyError && <p className="text-sm text-destructive font-medium bg-destructive/10 px-3 py-2 rounded-md">{companyError}</p>}
                 <Button onClick={handleCreateCompany} className="w-full" disabled={isCreatingCompany}>
                   {isCreatingCompany ? 'Creating...' : 'Create Company'}
                 </Button>
@@ -358,17 +565,22 @@ export default function AdminCustomersPage() {
             </DialogContent>
           </Dialog>
 
-          <Dialog open={isEditCompanyDialogOpen} onOpenChange={setIsEditCompanyDialogOpen}>
+          <Dialog open={isEditCompanyDialogOpen} onOpenChange={(open) => { setIsEditCompanyDialogOpen(open); if (!open) { resetCompanyForm(); setCompanyError(''); } }}>
             <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle>Edit Company</DialogTitle>
                 <DialogDescription>Update the profile for this company.</DialogDescription>
               </DialogHeader>
               <div className="grid gap-6 pt-4">
-                <div className="space-y-2">
+                <FieldWrapper error={companyTouchedFields.has('name') ? companyFieldErrors.name : null}>
                   <Label>Company Name <span className="text-destructive">*</span></Label>
-                  <Input value={newCompanyName} onChange={e => setNewCompanyName(e.target.value)} className="bg-muted/50" />
-                </div>
+                  <Input 
+                    value={newCompanyName} 
+                    onChange={e => setNewCompanyName(e.target.value)} 
+                    onBlur={() => handleCompanyFieldBlur('name')}
+                    className={`bg-muted/50 ${inputErrorClass('name', companyFieldErrors)}`} 
+                  />
+                </FieldWrapper>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -395,10 +607,15 @@ export default function AdminCustomersPage() {
                     <Label>Location</Label>
                     <Input value={newLocation} onChange={e => setNewLocation(e.target.value)} className="bg-muted/50" />
                   </div>
-                  <div className="space-y-2">
+                  <FieldWrapper error={companyTouchedFields.has('website_url') ? companyFieldErrors.website_url : null}>
                     <Label>Website URL</Label>
-                    <Input value={newWebsiteUrl} onChange={e => setNewWebsiteUrl(e.target.value)} className="bg-muted/50" />
-                  </div>
+                    <Input 
+                      value={newWebsiteUrl} 
+                      onChange={e => setNewWebsiteUrl(e.target.value)} 
+                      onBlur={() => handleCompanyFieldBlur('website_url')}
+                      className={`bg-muted/50 ${inputErrorClass('website_url', companyFieldErrors)}`} 
+                    />
+                  </FieldWrapper>
                 </div>
 
                 <div className="space-y-2">
@@ -410,7 +627,7 @@ export default function AdminCustomersPage() {
                   />
                 </div>
                 
-                {companyError && <p className="text-sm text-destructive font-medium">{companyError}</p>}
+                {companyError && <p className="text-sm text-destructive font-medium bg-destructive/10 px-3 py-2 rounded-md">{companyError}</p>}
                 <Button onClick={handleUpdateCompany} className="w-full" disabled={isCreatingCompany}>
                   {isCreatingCompany ? 'Updating...' : 'Save Changes'}
                 </Button>
@@ -418,7 +635,7 @@ export default function AdminCustomersPage() {
             </DialogContent>
           </Dialog>
 
-          <Dialog open={isCreateUserDialogOpen} onOpenChange={setIsCreateUserDialogOpen}>
+          <Dialog open={isCreateUserDialogOpen} onOpenChange={(open) => { setIsCreateUserDialogOpen(open); if (!open) { resetUserForm(); setUserError(''); } }}>
             <DialogTrigger asChild>
               <Button className="h-10 shadow-sm">
                 <Plus className="w-4 h-4 mr-2" />
@@ -435,39 +652,69 @@ export default function AdminCustomersPage() {
                   <Label>Full Name (Optional)</Label>
                   <Input value={newFullName} onChange={e => setNewFullName(e.target.value)} placeholder="John Doe" className="bg-muted/50" />
                 </div>
-                <div className="space-y-2">
-                  <Label>Email</Label>
-                  <Input type="email" value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="name@company.com" className="bg-muted/50" />
-                </div>
-                <div className="space-y-2">
-                  <Label>Password</Label>
-                  <Input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="•••••••••" className="bg-muted/50" />
-                </div>
+                <FieldWrapper error={userTouchedFields.has('email') ? userFieldErrors.email : null}>
+                  <Label>Email <span className="text-destructive">*</span></Label>
+                  <Input 
+                    type="email" 
+                    value={newEmail} 
+                    onChange={e => setNewEmail(e.target.value)} 
+                    onBlur={() => handleUserFieldBlur('email')}
+                    placeholder="name@company.com" 
+                    className={`bg-muted/50 ${inputErrorClass('email', userFieldErrors)}`} 
+                  />
+                </FieldWrapper>
+                <FieldWrapper error={userTouchedFields.has('password') ? userFieldErrors.password : null}>
+                  <Label>Password <span className="text-destructive">*</span></Label>
+                  <Input 
+                    type="password" 
+                    value={newPassword} 
+                    onChange={e => setNewPassword(e.target.value)} 
+                    onBlur={() => handleUserFieldBlur('password')}
+                    placeholder="•••••••••" 
+                    className={`bg-muted/50 ${inputErrorClass('password', userFieldErrors)}`} 
+                  />
+                </FieldWrapper>
                 <div className="space-y-2">
                   <Label>Role</Label>
                   <select
                     value={newRole}
-                    onChange={(e) => setNewRole(e.target.value as 'admin' | 'customer')}
+                    onChange={(e) => {
+                      const role = e.target.value as 'admin' | 'company_admin' | 'customer'
+                      setNewRole(role)
+                      // Re-validate company field when role changes
+                      if (role === 'admin') {
+                        setUserFieldErrors(prev => { const n = {...prev}; delete n.company; return n })
+                      } else if (userTouchedFields.has('company')) {
+                        validateUserField('company', selectedCompanyId)
+                      }
+                    }}
                     className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <option value="customer">Customer (Limited Access)</option>
+                    <option value="customer">Customer</option>
+                    <option value="company_admin">Company Admin</option>
                     <option value="admin">Admin (Full Control)</option>
                   </select>
                 </div>
-                {newRole === 'customer' && (
-                  <div className="space-y-2">
-                    <Label>Assign to Company</Label>
+                {(newRole === 'customer' || newRole === 'company_admin') && (
+                  <FieldWrapper error={userTouchedFields.has('company') ? userFieldErrors.company : null}>
+                    <Label>Assign to Company <span className="text-destructive">*</span></Label>
                     <select
                       value={selectedCompanyId}
-                      onChange={(e) => setSelectedCompanyId(e.target.value)}
-                      className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onChange={(e) => {
+                        setSelectedCompanyId(e.target.value)
+                        if (userTouchedFields.has('company')) {
+                          validateUserField('company', e.target.value)
+                        }
+                      }}
+                      onBlur={() => handleUserFieldBlur('company')}
+                      className={`flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${inputErrorClass('company', userFieldErrors)}`}
                     >
                       <option value="">Select a company...</option>
                       {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                     </select>
-                  </div>
+                  </FieldWrapper>
                 )}
-                {userError && <p className="text-sm text-destructive font-medium">{userError}</p>}
+                {userError && <p className="text-sm text-destructive font-medium bg-destructive/10 px-3 py-2 rounded-md">{userError}</p>}
                 <Button onClick={handleCreateUser} className="w-full" disabled={isCreatingUser}>
                   {isCreatingUser ? 'Creating...' : 'Send Invitation'}
                 </Button>
@@ -475,7 +722,7 @@ export default function AdminCustomersPage() {
             </DialogContent>
           </Dialog>
 
-          <Dialog open={isEditUserDialogOpen} onOpenChange={setIsEditUserDialogOpen}>
+          <Dialog open={isEditUserDialogOpen} onOpenChange={(open) => { setIsEditUserDialogOpen(open); if (!open) { resetUserForm(); setUserError(''); } }}>
             <DialogContent className="sm:max-w-md">
               <DialogHeader>
                 <DialogTitle>Edit User Profile</DialogTitle>
@@ -490,27 +737,34 @@ export default function AdminCustomersPage() {
                   <Label>Role</Label>
                   <select
                     value={newRole}
-                    onChange={(e) => setNewRole(e.target.value as 'admin' | 'customer')}
+                    onChange={(e) => setNewRole(e.target.value as 'admin' | 'company_admin' | 'customer')}
                     className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
-                    <option value="customer">Customer (Limited Access)</option>
+                    <option value="customer">Customer</option>
+                    <option value="company_admin">Company Admin</option>
                     <option value="admin">Admin (Full Control)</option>
                   </select>
                 </div>
-                {newRole === 'customer' && (
-                  <div className="space-y-2">
-                    <Label>Assign to Company</Label>
+                {(newRole === 'customer' || newRole === 'company_admin') && (
+                  <FieldWrapper error={userTouchedFields.has('company') ? userFieldErrors.company : null}>
+                    <Label>Assign to Company <span className="text-destructive">*</span></Label>
                     <select
                       value={selectedCompanyId}
-                      onChange={(e) => setSelectedCompanyId(e.target.value)}
-                      className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onChange={(e) => {
+                        setSelectedCompanyId(e.target.value)
+                        if (userTouchedFields.has('company')) {
+                          validateUserField('company', e.target.value)
+                        }
+                      }}
+                      onBlur={() => handleUserFieldBlur('company')}
+                      className={`flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${inputErrorClass('company', userFieldErrors)}`}
                     >
                       <option value="">Select a company...</option>
                       {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                     </select>
-                  </div>
+                  </FieldWrapper>
                 )}
-                {userError && <p className="text-sm text-destructive font-medium">{userError}</p>}
+                {userError && <p className="text-sm text-destructive font-medium bg-destructive/10 px-3 py-2 rounded-md">{userError}</p>}
                 <Button onClick={handleUpdateUser} className="w-full" disabled={isCreatingUser}>
                   {isCreatingUser ? 'Updating...' : 'Save Changes'}
                 </Button>
@@ -652,9 +906,9 @@ export default function AdminCustomersPage() {
                           </td>
                           <td className="px-6 py-4">
                             <div className="flex flex-col gap-1">
-                              <span className={`inline-flex items-center gap-1.5 w-fit px-2.5 py-1 text-xs font-medium rounded-full ${profile.role === 'admin' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : 'bg-blue-500/10 text-blue-500 border border-blue-500/20'}`}>
+                              <span className={`inline-flex items-center gap-1.5 w-fit px-2.5 py-1 text-xs font-medium rounded-full ${profile.role === 'admin' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : profile.role === 'company_admin' ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' : 'bg-blue-500/10 text-blue-500 border border-blue-500/20'}`}>
                                 {profile.role === 'admin' ? <ShieldAlert className="w-3 h-3" /> : <UserCheck className="w-3 h-3"/>}
-                                {profile.role}
+                                {profile.role === 'company_admin' ? 'company_admin' : profile.role}
                               </span>
                               {profile.company && (
                                 <span className="text-xs text-muted-foreground flex items-center gap-1.5 mt-1">
@@ -675,6 +929,26 @@ export default function AdminCustomersPage() {
                           </td>
                           <td className="px-6 py-4 text-right">
                              <div className="flex justify-end gap-2">
+                               {profile.role !== 'admin' && (
+                                 <Button
+                                   variant="ghost"
+                                   size="icon"
+                                   className="text-muted-foreground hover:text-amber-500 hover:bg-amber-500/10"
+                                   title={`Impersonate ${profile.full_name || profile.email}`}
+                                   onClick={() => {
+                                     setImpersonation({
+                                       userId: profile.id,
+                                       userEmail: profile.email || '',
+                                       userName: profile.full_name || profile.email || '',
+                                       companyId: profile.company_id || '',
+                                       role: profile.role,
+                                     })
+                                     router.push('/dashboard')
+                                   }}
+                                 >
+                                   <Eye className="w-4 h-4" />
+                                 </Button>
+                               )}
                                <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-primary hover:bg-primary/10" onClick={() => handleEditUserClick(profile)}>
                                  <Pencil className="w-4 h-4" />
                                </Button>

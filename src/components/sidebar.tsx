@@ -3,37 +3,19 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { useState, useEffect } from 'react'
+import { useAuth } from '@/lib/contexts/auth-context'
 import { useImpersonation } from '@/lib/contexts/impersonation-context'
-import { Profile } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { 
   Building2, Users, LayoutDashboard, Briefcase, 
-  Settings, LogOut, CheckCircle2, Sparkles, User, UserCheck
+  LogOut, Sparkles, User, UserCog, ShieldAlert, Activity, ShieldCheck
 } from 'lucide-react'
 
 export default function Sidebar() {
   const pathname = usePathname()
   const supabase = createClient()
-  const { impersonating, data: impData, isLoaded } = useImpersonation()
-  const [userProfile, setUserProfile] = useState<Profile | null>(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    async function loadUser() {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (user) {
-        const { data } = await supabase
-          .from('profiles')
-          .select('*, company:companies(*)')
-          .eq('id', user.id)
-          .single()
-        setUserProfile(data)
-      }
-      setLoading(false)
-    }
-    loadUser()
-  }, [supabase])
+  const { profile, loading } = useAuth()
+  const { impersonating, data: impData } = useImpersonation()
 
   const handleLogout = async () => {
     await supabase.auth.signOut()
@@ -50,24 +32,47 @@ export default function Sidebar() {
     </div>
   )
 
+  // --- Navigation links per role ---
   const adminLinks = [
     { name: 'Overview', href: '/admin', icon: LayoutDashboard },
     { name: 'Directory', href: '/admin/customers', icon: Users },
+    { name: 'Activity Log', href: '/admin/activity', icon: Activity },
+  ]
+
+  const companyAdminLinks = [
+    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { name: 'Team', href: '/dashboard/team', icon: UserCog },
+    { name: 'Job Groups', href: '/dashboard/groups', icon: ShieldCheck },
+    { name: 'Company Jobs', href: '/dashboard/jobs', icon: Briefcase },
+    { name: 'All Candidates', href: '/dashboard/candidates', icon: Users },
+    { name: 'Activity Log', href: '/dashboard/activity', icon: Activity },
   ]
 
   const customerLinks = [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { name: 'Job Postings', href: '/dashboard/jobs', icon: Briefcase },
-    { name: 'All Candidates', href: '/dashboard/candidates', icon: Users },
+    { name: 'My Jobs', href: '/dashboard/jobs', icon: Briefcase },
+    { name: 'My Candidates', href: '/dashboard/candidates', icon: Users },
   ]
 
-  const effectiveRole = impersonating ? 'customer' : userProfile?.role
-  const links = effectiveRole === 'admin' ? adminLinks : customerLinks;
+  // When impersonating, use the impersonated user's role
+  const effectiveRole = impersonating ? impData?.role : profile?.role
+  const links = effectiveRole === 'admin'
+    ? adminLinks
+    : effectiveRole === 'company_admin'
+      ? companyAdminLinks
+      : customerLinks
 
-  const displayName = impersonating ? impData?.userName : userProfile?.full_name || 'No Name'
-  const displayEmail = impersonating ? impData?.userEmail : userProfile?.email
-  const displayRole = impersonating ? 'customer' : userProfile?.role
-  const displayCompany = impersonating ? 'Impersonated Company' : userProfile?.company?.name
+  // --- Display info ---
+  const displayName = impersonating ? impData?.userName : profile?.full_name || 'No Name'
+  const displayEmail = impersonating ? impData?.userEmail : profile?.email
+  const displayRole = impersonating ? impData?.role : profile?.role
+  const displayCompany = impersonating ? impData?.companyId : profile?.company?.name
+
+  const roleBadgeColor = displayRole === 'admin'
+    ? 'bg-amber-500/10 text-amber-500'
+    : displayRole === 'company_admin'
+      ? 'bg-emerald-500/10 text-emerald-500'
+      : 'bg-blue-500/10 text-blue-500'
 
   return (
     <div className="w-72 bg-card/50 backdrop-blur-3xl border-r border-border/50 min-h-screen flex flex-col relative z-20">
@@ -126,7 +131,8 @@ export default function Sidebar() {
              </div>
              
              <div className="flex items-center gap-2 pt-2 border-t border-border/50">
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] uppercase font-bold tracking-wider ${displayRole === 'admin' ? 'bg-amber-500/10 text-amber-500' : 'bg-blue-500/10 text-blue-500'}`}>
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] uppercase font-bold tracking-wider ${roleBadgeColor}`}>
+                   {displayRole === 'admin' && <ShieldAlert className="w-3 h-3" />}
                    {displayRole}
                 </span>
                 {displayCompany && (
