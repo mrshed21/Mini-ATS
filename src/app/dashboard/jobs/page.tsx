@@ -29,6 +29,7 @@ export default function JobsPage() {
   const router = useRouter()
   const { role, companyId, profile, loading: authLoading } = useAuth()
   const { impersonating, data: impData } = useImpersonation()
+  const effectiveCompanyId = getEffectiveCompanyId(impersonating, impData, companyId)
 
   const [jobs, setJobs] = useState<Job[]>([])
   const [loading, setLoading] = useState(true)
@@ -82,19 +83,26 @@ export default function JobsPage() {
 
   // ── Load jobs — wait for auth to finish ──────────────────────
   const loadJobs = useCallback(async () => {
-    // Never fetch until auth context is ready AND companyId is available
-    if (authLoading || !companyId) return
-    setLoading(true)
-
-    const { data: { user } } = await supabase.auth.getUser()
-    const targetUserId = getEffectiveUserId(impersonating, impData, user?.id)
-    const targetCompanyId = getEffectiveCompanyId(impersonating, impData, companyId)
-
-    if (!targetUserId || !targetCompanyId) {
+    // Never fetch until auth context is ready
+    if (authLoading) return
+    
+    // If not admin and no company, or admin and no target company while impersonating
+    if (!effectiveCompanyId && role !== 'admin') {
       setJobs([])
       setLoading(false)
       return
     }
+
+    setLoading(true)
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      const targetUserId = getEffectiveUserId(impersonating, impData, user?.id)
+      const targetCompanyId = effectiveCompanyId
+
+      if (!targetUserId && role !== 'admin') {
+        setJobs([])
+        return
+      }
 
     // Single flat query — no joins, explicit company_id filter (UUID)
     // This matches the new RLS policy using auth.jwt() for zero recursion
@@ -102,24 +110,26 @@ export default function JobsPage() {
       .from('jobs')
       .select('id, title, description, location, job_type, salary_range, status, created_at, company_id, customer_id')
 
-    // If not super admin, filter by company_id
-    if (role !== 'admin') {
-      const targetCompanyId = getEffectiveCompanyId(impersonating, impData, companyId)
+    // Filter by company_id if not super admin OR if impersonating
+    if (role !== 'admin' || impersonating) {
       if (targetCompanyId) {
         query = query.eq('company_id', targetCompanyId)
-      } else {
+      } else if (role !== 'admin') {
         setJobs([])
-        setLoading(false)
         return
       }
     }
 
-    const { data, error: fetchErr } = await query.order('created_at', { ascending: false })
+      const { data, error: fetchErr } = await query.order('created_at', { ascending: false })
 
-    if (fetchErr) console.error('Jobs fetch error:', fetchErr.message)
-    setJobs(data || [])
-    setLoading(false)
-  }, [authLoading, companyId, impersonating, impData, role])
+      if (fetchErr) console.error('Jobs fetch error:', fetchErr.message)
+      setJobs(data || [])
+    } catch (err) {
+      console.error('Error in loadJobs:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [authLoading, effectiveCompanyId, impersonating, impData, role])
 
   useEffect(() => {
     loadJobs()
@@ -145,7 +155,8 @@ export default function JobsPage() {
       if (!effectiveUserId) throw new Error('Unable to determine user identity.')
 
       // Use selected company (for admin) or context company
-      const finalCompanyId = role === 'admin' ? selectedCompanyId : companyId
+      // If impersonating, ALWAYS use the target company
+      const finalCompanyId = impersonating ? impData?.companyId : (role === 'admin' ? selectedCompanyId : companyId)
 
       if (!finalCompanyId) {
         throw new Error(
@@ -250,7 +261,7 @@ export default function JobsPage() {
         .from('jobs')
         .update(payload)
         .eq('id', editJobId)
-        .eq('company_id', companyId)
+        .eq('company_id', effectiveCompanyId!)
 
       if (updateErr) {
         console.error('[Jobs] Update error:', updateErr.message)
@@ -262,7 +273,7 @@ export default function JobsPage() {
         entityType: 'job',
         entityId: editJobId,
         entityName: editTitle.trim(),
-        companyId,
+        companyId: effectiveCompanyId,
         impersonating,
         impersonatedId: impData?.userId,
         impersonatedName: impData?.userName,
@@ -281,14 +292,14 @@ export default function JobsPage() {
   async function handleDeleteJob(id: string, title?: string) {
     if (!confirm(`Are you sure you want to delete "${title || 'this job'}" and all associated candidates?`)) return
     try {
-      const { error: delErr } = await supabase.from('jobs').delete().eq('id', id).eq('company_id', companyId!)
+      const { error: delErr } = await supabase.from('jobs').delete().eq('id', id).eq('company_id', effectiveCompanyId!)
       if (delErr) throw delErr
       await logActivityAuto(supabase, {
         action: 'delete',
         entityType: 'job',
         entityId: id,
         entityName: title,
-        companyId: companyId,
+        companyId: effectiveCompanyId,
         impersonating,
         impersonatedId: impData?.userId,
         impersonatedName: impData?.userName,
@@ -342,7 +353,7 @@ export default function JobsPage() {
                 />
               </div>
 
-              {role === 'admin' && (
+              {role === 'admin' && !impersonating && (
                 <div className="space-y-2">
                   <Label htmlFor="company-select">Assign to Company <span className="text-destructive">*</span></Label>
                   <select

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/lib/contexts/auth-context'
+import { useImpersonation, getEffectiveCompanyId, getEffectiveUserId } from '@/lib/contexts/impersonation-context'
 import { logActivityAuto } from '@/lib/audit'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -52,7 +53,11 @@ interface CompanyJob {
 }
 
 export default function GroupsPage() {
-  const { companyId, profile, loading: authLoading } = useAuth()
+  const { role, companyId, profile, loading: authLoading } = useAuth()
+  const { impersonating, data: impData } = useImpersonation()
+
+  const effectiveCompanyId = getEffectiveCompanyId(impersonating, impData, companyId)
+  const effectiveUserId = getEffectiveUserId(impersonating, impData, profile?.id)
   const supabase = createClient()
 
   const [groups, setGroups] = useState<Group[]>([])
@@ -90,7 +95,11 @@ export default function GroupsPage() {
 
   // ── Load all data — wait for auth ────────────────────────────
   const loadAll = useCallback(async () => {
-    if (authLoading || !companyId) return
+    if (authLoading) return
+    if (!effectiveCompanyId) {
+      setLoading(false)
+      return
+    }
     setLoading(true)
 
     // Round 1: flat queries only — no joins, explicit company_id filter
@@ -98,17 +107,17 @@ export default function GroupsPage() {
       supabase
         .from('job_groups')
         .select('*')
-        .eq('company_id', companyId)
+        .eq('company_id', effectiveCompanyId)
         .order('created_at'),
       supabase
         .from('profiles')
         .select('id, full_name, email, role')
-        .eq('company_id', companyId)
+        .eq('company_id', effectiveCompanyId)
         .order('full_name'),
       supabase
         .from('jobs')
         .select('id, title, status, customer_id, company_id')
-        .eq('company_id', companyId)
+        .eq('company_id', effectiveCompanyId)
         .order('created_at', { ascending: false }),
     ])
 
@@ -156,7 +165,7 @@ export default function GroupsPage() {
     }
 
     setLoading(false)
-  }, [authLoading, companyId])
+  }, [authLoading, effectiveCompanyId])
 
   useEffect(() => {
     loadAll()
@@ -166,7 +175,7 @@ export default function GroupsPage() {
   async function handleCreateGroup() {
     setCreateError('')
     if (!newGroupName.trim()) return setCreateError('Group name is required')
-    if (!companyId || !profile?.id) return setCreateError('Profile not loaded. Please refresh.')
+    if (!effectiveCompanyId || !effectiveUserId) return setCreateError('Profile or company not loaded. Please refresh.')
 
     setCreating(true)
     try {
@@ -174,8 +183,8 @@ export default function GroupsPage() {
         .from('job_groups')
         .insert([{
           name: newGroupName.trim(),
-          company_id: companyId,     // ← explicit UUID
-          created_by: profile.id,   // ← explicit UUID
+          company_id: effectiveCompanyId,     // ← explicit UUID
+          created_by: effectiveUserId,   // ← explicit UUID
         }])
         .select()
         .single()
@@ -187,7 +196,7 @@ export default function GroupsPage() {
         entityType: 'group',
         entityId: data.id,
         entityName: data.name,
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       setNewGroupName('')
@@ -205,7 +214,7 @@ export default function GroupsPage() {
     if (!confirm(`Delete group "${group.name}"? This will remove all member links and job access.`)) return
 
     // Safety: only delete groups in this company
-    if (group.company_id !== companyId) {
+    if (group.company_id !== effectiveCompanyId) {
       alert('Cannot delete a group from another company.')
       return
     }
@@ -215,7 +224,7 @@ export default function GroupsPage() {
         .from('job_groups')
         .delete()
         .eq('id', group.id)
-        .eq('company_id', companyId)
+        .eq('company_id', effectiveCompanyId)
 
       if (error) throw error
 
@@ -224,7 +233,7 @@ export default function GroupsPage() {
         entityType: 'group',
         entityId: group.id,
         entityName: group.name,
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       loadAll()
@@ -237,7 +246,7 @@ export default function GroupsPage() {
   async function handleAddMember(groupId: string) {
     setAddMemberError('')
     if (!addMemberUserId) return setAddMemberError('Select a member')
-    if (!profile?.id) return setAddMemberError('Profile not loaded. Please refresh.')
+    if (!effectiveUserId) return setAddMemberError('Profile identity not loaded. Please refresh.')
 
     // Verify the selected user is in this company
     const isCompanyMember = members.some((m) => m.id === addMemberUserId)
@@ -251,7 +260,7 @@ export default function GroupsPage() {
         .insert([{
           group_id: groupId,
           user_id: addMemberUserId,
-          added_by: profile.id,
+          added_by: effectiveUserId,
         }])
 
       if (error) {
@@ -268,7 +277,7 @@ export default function GroupsPage() {
         entityId: groupId,
         entityName: groupName,
         newValue: { added_member: memberName },
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       setAddMemberGroupId(null)
@@ -296,7 +305,7 @@ export default function GroupsPage() {
         entityId: groupId,
         entityName: groupName,
         newValue: { removed_member: userName },
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       loadAll()
@@ -309,7 +318,7 @@ export default function GroupsPage() {
   async function handleAssignJob(groupId: string) {
     setAssignJobError('')
     if (!assignJobId) return setAssignJobError('Select a job')
-    if (!profile?.id) return setAssignJobError('Profile not loaded. Please refresh.')
+    if (!effectiveUserId) return setAssignJobError('Profile identity not loaded. Please refresh.')
 
     // Verify the selected job belongs to this company
     const isCompanyJob = jobs.some((j) => j.id === assignJobId)
@@ -323,7 +332,7 @@ export default function GroupsPage() {
         .insert([{
           job_id: assignJobId,
           group_id: groupId,
-          granted_by: profile.id,
+          granted_by: effectiveUserId,
         }])
 
       if (error) {
@@ -340,7 +349,7 @@ export default function GroupsPage() {
         entityId: assignJobId,
         entityName: jobTitle,
         newValue: { group: groupName },
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       setAssignJobGroupId(null)
@@ -365,7 +374,7 @@ export default function GroupsPage() {
         entityId: groupId,
         entityName: groupName,
         newValue: { removed_job: jobTitle },
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       loadAll()

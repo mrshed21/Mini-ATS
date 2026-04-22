@@ -50,9 +50,18 @@ export default function AllCandidatesPage() {
       return
     }
 
-    if (role === 'company_admin' && targetCompanyId && !impersonating) {
-      // Company Admin: fetch ALL candidates for ALL jobs in their company
-      // Step 1: Fetch company jobs first (avoids cross-table RLS recursion from inner joins)
+    if (role === 'admin' && !impersonating) {
+      // Global Admin (not impersonating): fetch EVERYTHING
+      const [candidatesRes, jobsRes] = await Promise.all([
+        supabase.from('candidates').select('*').order('created_at', { ascending: false }),
+        supabase.from('jobs').select('*').order('created_at', { ascending: false }),
+      ])
+      if (candidatesRes.error) console.error('Candidates error:', candidatesRes.error.message)
+      if (jobsRes.error) console.error('Jobs error:', jobsRes.error.message)
+      setCandidates(candidatesRes.data || [])
+      setJobs(jobsRes.data || [])
+    } else if ((role === 'company_admin' || (role === 'admin' && impersonating)) && targetCompanyId) {
+      // Company Admin or Impersonated Admin: fetch ALL candidates for ALL jobs in target company
       const jobsRes = await supabase
         .from('jobs')
         .select('*')
@@ -63,9 +72,8 @@ export default function AllCandidatesPage() {
       const companyJobs = jobsRes.data || []
       setJobs(companyJobs)
 
-      // Step 2: Fetch candidates for those job IDs only
       if (companyJobs.length > 0) {
-        const jobIds = companyJobs.map((j: { id: string }) => j.id)
+        const jobIds = companyJobs.map((j) => j.id)
         const candidatesRes = await supabase
           .from('candidates')
           .select('*')
@@ -77,8 +85,8 @@ export default function AllCandidatesPage() {
       } else {
         setCandidates([])
       }
-    } else {
-      // Customer or impersonated: own jobs + group-shared (RLS handles filtering)
+    } else if (targetUserId) {
+      // Regular customer/user: own jobs only
       const [candidatesRes, jobsRes] = await Promise.all([
         supabase
           .from('candidates')
@@ -96,6 +104,9 @@ export default function AllCandidatesPage() {
 
       setCandidates(candidatesRes.data || [])
       setJobs(jobsRes.data || [])
+    } else {
+      setCandidates([])
+      setJobs([])
     }
 
     setLoading(false)

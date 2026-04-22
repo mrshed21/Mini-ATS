@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/lib/contexts/auth-context'
+import { useImpersonation, getEffectiveCompanyId, getEffectiveUserId } from '@/lib/contexts/impersonation-context'
 import { logActivityAuto } from '@/lib/audit'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -63,7 +64,11 @@ interface CompanyJob {
 }
 
 export default function TeamManagementPage() {
-  const { companyId, profile, loading: authLoading } = useAuth()
+  const { role, companyId, profile, loading: authLoading } = useAuth()
+  const { impersonating, data: impData } = useImpersonation()
+
+  const effectiveCompanyId = getEffectiveCompanyId(impersonating, impData, companyId)
+  const effectiveUserId = getEffectiveUserId(impersonating, impData, profile?.id)
 
   const [members, setMembers] = useState<TeamMember[]>([])
   const [jobs, setJobs] = useState<CompanyJob[]>([])
@@ -91,19 +96,23 @@ export default function TeamManagementPage() {
 
   // ── Load data — wait for auth ─────────────────────────────────
   const loadData = useCallback(async () => {
-    if (authLoading || !companyId) return
+    if (authLoading) return
+    if (!effectiveCompanyId) {
+      setLoading(false)
+      return
+    }
     setLoading(true)
 
     const [membersRes, jobsRes] = await Promise.all([
       supabase
         .from('profiles')
         .select('id, email, full_name, role, updated_at')
-        .eq('company_id', companyId)
+        .eq('company_id', effectiveCompanyId)
         .order('updated_at', { ascending: true }),
       supabase
         .from('jobs')
         .select('id, title, customer_id, created_at')
-        .eq('company_id', companyId)
+        .eq('company_id', effectiveCompanyId)
         .order('created_at', { ascending: false }),
     ])
 
@@ -118,7 +127,7 @@ export default function TeamManagementPage() {
     setMembers(mappedMembers)
     setJobs(jobsRes.data || [])
     setLoading(false)
-  }, [authLoading, companyId])
+  }, [authLoading, effectiveCompanyId])
 
   useEffect(() => {
     loadData()
@@ -166,8 +175,8 @@ export default function TeamManagementPage() {
     setInviteError('')
     if (authLoading) return setInviteError('Authentication is still loading. Please wait.')
     if (!inviteEmail.trim()) return setInviteError('Email is required')
-    if (!companyId) return setInviteError('No company associated with your account')
-    if (!profile?.id) return setInviteError('Profile not loaded. Please refresh.')
+    if (!effectiveCompanyId) return setInviteError('No company associated with your account or target')
+    if (!effectiveUserId) return setInviteError('User identity not determined. Please refresh.')
     if (!invitePassword || invitePassword.length < 6) return setInviteError('Password must be at least 6 characters')
 
     setInviteSending(true)
@@ -185,14 +194,14 @@ export default function TeamManagementPage() {
 
       if (existing) {
         // Profile exists — update their company + role
-        if (existing.company_id && existing.company_id !== companyId) {
+        if (existing.company_id && existing.company_id !== effectiveCompanyId) {
           throw new Error('This user already belongs to another company. They must leave it first.')
         }
 
         const { error } = await supabase
           .from('profiles')
           .update({
-            company_id: companyId,
+            company_id: effectiveCompanyId,
             role: inviteRole,
             ...(inviteName.trim() ? { full_name: inviteName.trim() } : {}),
           })
@@ -207,8 +216,8 @@ export default function TeamManagementPage() {
           action: 'update',
           entityType: 'profile',
           entityName: inviteEmail.trim(),
-          newValue: { role: inviteRole, action: 'updated', company_id: companyId },
-          companyId,
+          newValue: { role: inviteRole, action: 'updated', company_id: effectiveCompanyId },
+          companyId: effectiveCompanyId,
         })
 
         // Success — reset and close
@@ -233,7 +242,7 @@ export default function TeamManagementPage() {
           data: {
             full_name: inviteName.trim() || inviteEmail.split('@')[0],
             role: inviteRole,
-            company_id: companyId,
+            company_id: effectiveCompanyId,
           },
         },
       })
@@ -261,7 +270,7 @@ export default function TeamManagementPage() {
         .update({
           full_name: inviteName.trim() || inviteEmail.split('@')[0],
           role: inviteRole,
-          company_id: companyId,
+          company_id: effectiveCompanyId,
         })
         .eq('id', authData.user.id)
 
@@ -276,7 +285,7 @@ export default function TeamManagementPage() {
         entityId: authData.user.id,
         entityName: inviteEmail.trim(),
         newValue: { role: inviteRole, action: 'created', company_id: companyId },
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       // Show success with password info
@@ -303,11 +312,11 @@ export default function TeamManagementPage() {
   // ── Remove member from company (soft-delete) ──────────────────
   async function handleRemove(memberId: string) {
     if (authLoading) return
-    if (memberId === profile?.id) {
+    if (memberId === effectiveUserId) {
       setToast({ type: 'error', message: 'You cannot remove yourself from the company.' })
       return
     }
-    if (!companyId || !profile?.id) {
+    if (!effectiveCompanyId || !effectiveUserId) {
       setToast({ type: 'error', message: 'Missing company or profile data. Please refresh.' })
       return
     }
@@ -327,9 +336,9 @@ export default function TeamManagementPage() {
       if (memberJobs.length > 0) {
         const { error: transferError } = await supabase
           .from('jobs')
-          .update({ customer_id: profile.id })
+          .update({ customer_id: effectiveUserId })
           .in('id', memberJobs.map((j) => j.id))
-          .eq('company_id', companyId)
+          .eq('company_id', effectiveCompanyId)
 
         if (transferError) {
           console.error('[Team] Job transfer error:', transferError.message)
@@ -355,7 +364,7 @@ export default function TeamManagementPage() {
         entityId: memberId,
         entityName: memberName,
         newValue: { action: 'removed_from_company', jobs_transferred: memberJobs.length },
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       // Step 4: Show success + reload
@@ -376,7 +385,7 @@ export default function TeamManagementPage() {
   async function handleReassignJob() {
     setReassignError('')
     if (authLoading) return setReassignError('Authentication is still loading. Please wait.')
-    if (!companyId) return setReassignError('No company associated with your account')
+    if (!effectiveCompanyId) return setReassignError('No company associated with your account or target')
     if (!reassignJobId || !reassignToUserId) {
       return setReassignError('Please select both a job and a team member')
     }
@@ -396,7 +405,7 @@ export default function TeamManagementPage() {
         .from('jobs')
         .update({ customer_id: reassignToUserId })
         .eq('id', reassignJobId)
-        .eq('company_id', companyId)
+        .eq('company_id', effectiveCompanyId)
 
       if (error) {
         console.error('[Team] Reassign job error:', error.message)
@@ -409,7 +418,7 @@ export default function TeamManagementPage() {
         entityId: reassignJobId,
         entityName: jobTitle,
         newValue: { assigned_to: toName, assigned_to_id: reassignToUserId },
-        companyId,
+        companyId: effectiveCompanyId,
       })
 
       setIsReassignOpen(false)
