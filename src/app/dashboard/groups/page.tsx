@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/lib/contexts/auth-context'
 import { logActivityAuto } from '@/lib/audit'
@@ -29,7 +29,7 @@ interface GroupMember {
   user_id: string
   added_by: string
   added_at: string
-  profile?: { full_name: string; email: string; role: string }
+  user_profile?: { full_name: string; email: string; role: string }
 }
 
 interface CompanyMember {
@@ -54,7 +54,7 @@ interface CompanyJob {
 }
 
 export default function GroupsPage() {
-  const { companyId, profile } = useAuth()
+  const { companyId, profile, loading: authLoading } = useAuth()
   const supabase = createClient()
 
   const [groups, setGroups] = useState<Group[]>([])
@@ -80,19 +80,32 @@ export default function GroupsPage() {
   const [assignJobId, setAssignJobId] = useState('')
   const [assignJobError, setAssignJobError] = useState('')
 
-  useEffect(() => {
-    if (companyId) loadAll()
-  }, [companyId])
-
-  async function loadAll() {
-    if (!companyId) return
+  // ── Load all data — wait for auth ────────────────────────────
+  const loadAll = useCallback(async () => {
+    if (authLoading || !companyId) return
     setLoading(true)
 
     const [groupsRes, membersRes, jobsRes] = await Promise.all([
-      supabase.from('job_groups').select('*').eq('company_id', companyId).order('created_at'),
-      supabase.from('profiles').select('id, full_name, email, role').eq('company_id', companyId).order('full_name'),
-      supabase.from('jobs').select('id, title, status, customer_id').eq('company_id', companyId).order('created_at', { ascending: false }),
+      supabase
+        .from('job_groups')
+        .select('*')
+        .eq('company_id', companyId)   // ← strict company filter
+        .order('created_at'),
+      supabase
+        .from('profiles')
+        .select('id, full_name, email, role')
+        .eq('company_id', companyId)   // ← only this company's members
+        .order('full_name'),
+      supabase
+        .from('jobs')
+        .select('id, title, status, customer_id')
+        .eq('company_id', companyId)   // ← only this company's jobs
+        .order('created_at', { ascending: false }),
     ])
+
+    if (groupsRes.error) console.error('Groups error:', groupsRes.error.message)
+    if (membersRes.error) console.error('Members error:', membersRes.error.message)
+    if (jobsRes.error) console.error('Jobs error:', jobsRes.error.message)
 
     const fetchedGroups: Group[] = groupsRes.data || []
     setGroups(fetchedGroups)
@@ -100,12 +113,12 @@ export default function GroupsPage() {
     setJobs(jobsRes.data || [])
 
     if (fetchedGroups.length > 0) {
-      const groupIds = fetchedGroups.map(g => g.id)
+      const groupIds = fetchedGroups.map((g) => g.id)
 
       const [gMembersRes, jAccessRes] = await Promise.all([
         supabase
           .from('job_group_members')
-          .select('*, profile:profiles(full_name, email, role)')
+          .select('*, user_profile:profiles!job_group_members_user_id_fkey(full_name, email, role)')
           .in('group_id', groupIds),
         supabase
           .from('job_access')
@@ -113,9 +126,9 @@ export default function GroupsPage() {
           .in('group_id', groupIds),
       ])
 
-      // Index by group_id
       const gmMap: Record<string, GroupMember[]> = {}
       const jaMap: Record<string, JobAccessRow[]> = {}
+
       ;(gMembersRes.data || []).forEach((m: GroupMember) => {
         if (!gmMap[m.group_id]) gmMap[m.group_id] = []
         gmMap[m.group_id].push(m)
@@ -124,26 +137,36 @@ export default function GroupsPage() {
         if (!jaMap[a.group_id]) jaMap[a.group_id] = []
         jaMap[a.group_id].push(a)
       })
+
       setGroupMembers(gmMap)
       setJobAccess(jaMap)
     }
 
     setLoading(false)
-  }
+  }, [authLoading, companyId])
 
-  // ── Create Group ──────────────────────────────────────────
+  useEffect(() => {
+    loadAll()
+  }, [loadAll])
+
+  // ── Create Group ─────────────────────────────────────────────
   async function handleCreateGroup() {
     setCreateError('')
     if (!newGroupName.trim()) return setCreateError('Group name is required')
-    if (!companyId || !profile?.id) return
+    if (!companyId || !profile?.id) return setCreateError('Profile not loaded. Please refresh.')
 
     setCreating(true)
     try {
       const { data, error } = await supabase
         .from('job_groups')
-        .insert([{ name: newGroupName.trim(), company_id: companyId, created_by: profile.id }])
+        .insert([{
+          name: newGroupName.trim(),
+          company_id: companyId,     // ← explicit UUID
+          created_by: profile.id,   // ← explicit UUID
+        }])
         .select()
         .single()
+
       if (error) throw error
 
       await logActivityAuto(supabase, {
@@ -164,11 +187,23 @@ export default function GroupsPage() {
     }
   }
 
-  // ── Delete Group ──────────────────────────────────────────
+  // ── Delete Group ─────────────────────────────────────────────
   async function handleDeleteGroup(group: Group) {
     if (!confirm(`Delete group "${group.name}"? This will remove all member links and job access.`)) return
+
+    // Safety: only delete groups in this company
+    if (group.company_id !== companyId) {
+      alert('Cannot delete a group from another company.')
+      return
+    }
+
     try {
-      const { error } = await supabase.from('job_groups').delete().eq('id', group.id)
+      const { error } = await supabase
+        .from('job_groups')
+        .delete()
+        .eq('id', group.id)
+        .eq('company_id', companyId)   // ← double safety
+
       if (error) throw error
 
       await logActivityAuto(supabase, {
@@ -185,23 +220,35 @@ export default function GroupsPage() {
     }
   }
 
-  // ── Add Member ────────────────────────────────────────────
+  // ── Add Member to Group ──────────────────────────────────────
   async function handleAddMember(groupId: string) {
     setAddMemberError('')
     if (!addMemberUserId) return setAddMemberError('Select a member')
-    if (!profile?.id) return
+    if (!profile?.id) return setAddMemberError('Profile not loaded. Please refresh.')
+
+    // Verify the selected user is in this company
+    const isCompanyMember = members.some((m) => m.id === addMemberUserId)
+    if (!isCompanyMember) {
+      return setAddMemberError('Selected user is not a member of your company.')
+    }
 
     try {
       const { error } = await supabase
         .from('job_group_members')
-        .insert([{ group_id: groupId, user_id: addMemberUserId, added_by: profile.id }])
+        .insert([{
+          group_id: groupId,              // ← explicit UUID
+          user_id: addMemberUserId,       // ← explicit UUID (validated above)
+          added_by: profile.id,           // ← explicit UUID
+        }])
+
       if (error) {
         if (error.code === '23505') throw new Error('Member already in this group')
         throw error
       }
 
-      const memberName = members.find(m => m.id === addMemberUserId)?.full_name || addMemberUserId
-      const groupName = groups.find(g => g.id === groupId)?.name
+      const memberName = members.find((m) => m.id === addMemberUserId)?.full_name || addMemberUserId
+      const groupName = groups.find((g) => g.id === groupId)?.name
+
       await logActivityAuto(supabase, {
         action: 'update',
         entityType: 'group',
@@ -219,7 +266,7 @@ export default function GroupsPage() {
     }
   }
 
-  // ── Remove Member ─────────────────────────────────────────
+  // ── Remove Member from Group ─────────────────────────────────
   async function handleRemoveMember(memberId: string, groupId: string, userName: string) {
     if (!confirm(`Remove "${userName}" from this group?`)) return
     try {
@@ -229,7 +276,7 @@ export default function GroupsPage() {
         .eq('id', memberId)
       if (error) throw error
 
-      const groupName = groups.find(g => g.id === groupId)?.name
+      const groupName = groups.find((g) => g.id === groupId)?.name
       await logActivityAuto(supabase, {
         action: 'update',
         entityType: 'group',
@@ -245,23 +292,35 @@ export default function GroupsPage() {
     }
   }
 
-  // ── Assign Job ────────────────────────────────────────────
+  // ── Assign Job to Group ──────────────────────────────────────
   async function handleAssignJob(groupId: string) {
     setAssignJobError('')
     if (!assignJobId) return setAssignJobError('Select a job')
-    if (!profile?.id) return
+    if (!profile?.id) return setAssignJobError('Profile not loaded. Please refresh.')
+
+    // Verify the selected job belongs to this company
+    const isCompanyJob = jobs.some((j) => j.id === assignJobId)
+    if (!isCompanyJob) {
+      return setAssignJobError('Selected job does not belong to your company.')
+    }
 
     try {
       const { error } = await supabase
         .from('job_access')
-        .insert([{ job_id: assignJobId, group_id: groupId, granted_by: profile.id }])
+        .insert([{
+          job_id: assignJobId,    // ← validated UUID
+          group_id: groupId,      // ← explicit UUID
+          granted_by: profile.id, // ← explicit UUID
+        }])
+
       if (error) {
         if (error.code === '23505') throw new Error('Job already linked to this group')
         throw error
       }
 
-      const jobTitle = jobs.find(j => j.id === assignJobId)?.title
-      const groupName = groups.find(g => g.id === groupId)?.name
+      const jobTitle = jobs.find((j) => j.id === assignJobId)?.title
+      const groupName = groups.find((g) => g.id === groupId)?.name
+
       await logActivityAuto(supabase, {
         action: 'group_assigned',
         entityType: 'job_access',
@@ -279,14 +338,14 @@ export default function GroupsPage() {
     }
   }
 
-  // ── Revoke Job Access ─────────────────────────────────────
+  // ── Revoke Job Access ────────────────────────────────────────
   async function handleRevokeJob(accessId: string, groupId: string, jobTitle?: string) {
-    if (!confirm(`Remove job access from this group?`)) return
+    if (!confirm('Remove job access from this group?')) return
     try {
       const { error } = await supabase.from('job_access').delete().eq('id', accessId)
       if (error) throw error
 
-      const groupName = groups.find(g => g.id === groupId)?.name
+      const groupName = groups.find((g) => g.id === groupId)?.name
       await logActivityAuto(supabase, {
         action: 'update',
         entityType: 'job_access',
@@ -302,18 +361,19 @@ export default function GroupsPage() {
     }
   }
 
-  // ── Helpers ───────────────────────────────────────────────
+  // ── Helpers ──────────────────────────────────────────────────
   function getAvailableMembers(groupId: string) {
-    const existing = (groupMembers[groupId] || []).map(m => m.user_id)
-    return members.filter(m => !existing.includes(m.id))
+    const existing = (groupMembers[groupId] || []).map((m) => m.user_id)
+    return members.filter((m) => !existing.includes(m.id))
   }
 
   function getAvailableJobs(groupId: string) {
-    const existing = (jobAccess[groupId] || []).map(a => a.job_id)
-    return jobs.filter(j => !existing.includes(j.id))
+    const existing = (jobAccess[groupId] || []).map((a) => a.job_id)
+    return jobs.filter((j) => !existing.includes(j.id))
   }
 
-  if (loading) {
+  // ── Render ────────────────────────────────────────────────────
+  if (loading || authLoading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
@@ -331,6 +391,7 @@ export default function GroupsPage() {
             Create groups to give multiple team members shared access to the same jobs.
           </p>
         </div>
+
         <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
           <DialogTrigger asChild>
             <Button className="h-10 rounded-lg">
@@ -346,18 +407,22 @@ export default function GroupsPage() {
             </DialogHeader>
             <div className="grid gap-4 py-4">
               <div className="space-y-2">
-                <Label htmlFor="group-name">Group Name <span className="text-destructive">*</span></Label>
+                <Label htmlFor="group-name">
+                  Group Name <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   id="group-name"
                   value={newGroupName}
-                  onChange={e => setNewGroupName(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleCreateGroup()}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleCreateGroup()}
                   placeholder="e.g. Engineering Team, HR Squad..."
                   className="bg-muted/50"
                 />
               </div>
-              {createError && <p className="text-sm text-destructive font-medium">{createError}</p>}
-              <Button onClick={handleCreateGroup} disabled={creating} className="w-full">
+              {createError && (
+                <p className="text-sm text-destructive font-medium">{createError}</p>
+              )}
+              <Button onClick={handleCreateGroup} disabled={creating || !companyId} className="w-full">
                 {creating ? 'Creating...' : 'Create Group'}
               </Button>
             </div>
@@ -380,7 +445,7 @@ export default function GroupsPage() {
         </Card>
       ) : (
         <div className="space-y-6">
-          {groups.map(group => {
+          {groups.map((group) => {
             const gMembers = groupMembers[group.id] || []
             const gAccess = jobAccess[group.id] || []
             const availableMembers = getAvailableMembers(group.id)
@@ -397,7 +462,8 @@ export default function GroupsPage() {
                     <div>
                       <h2 className="text-base font-semibold">{group.name}</h2>
                       <p className="text-xs text-muted-foreground">
-                        {gMembers.length} member{gMembers.length !== 1 ? 's' : ''} · {gAccess.length} job{gAccess.length !== 1 ? 's' : ''}
+                        {gMembers.length} member{gMembers.length !== 1 ? 's' : ''} ·{' '}
+                        {gAccess.length} job{gAccess.length !== 1 ? 's' : ''}
                       </p>
                     </div>
                   </div>
@@ -415,42 +481,53 @@ export default function GroupsPage() {
                   {/* Members Column */}
                   <div className="p-5 space-y-3">
                     <div className="flex items-center justify-between mb-2">
-                      <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Members</h3>
+                      <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+                        Members
+                      </h3>
                       <Dialog
                         open={addMemberGroupId === group.id}
-                        onOpenChange={open => {
+                        onOpenChange={(open) => {
                           setAddMemberGroupId(open ? group.id : null)
                           setAddMemberUserId('')
                           setAddMemberError('')
                         }}
                       >
                         <DialogTrigger asChild>
-                          <Button variant="outline" size="sm" className="h-7 text-xs" disabled={availableMembers.length === 0}>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs"
+                            disabled={availableMembers.length === 0}
+                          >
                             <UserPlus className="w-3 h-3 mr-1" /> Add
                           </Button>
                         </DialogTrigger>
                         <DialogContent>
                           <DialogHeader>
-                            <DialogTitle>Add Member to "{group.name}"</DialogTitle>
-                            <DialogDescription>Select a team member to add to this group.</DialogDescription>
+                            <DialogTitle>Add Member to &quot;{group.name}&quot;</DialogTitle>
+                            <DialogDescription>
+                              Select a team member to add to this group.
+                            </DialogDescription>
                           </DialogHeader>
                           <div className="grid gap-4 py-4">
                             <div className="space-y-2">
                               <Label>Team Member</Label>
                               <select
                                 value={addMemberUserId}
-                                onChange={e => setAddMemberUserId(e.target.value)}
+                                onChange={(e) => setAddMemberUserId(e.target.value)}
                                 className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               >
                                 <option value="">Choose a member...</option>
-                                {availableMembers.map(m => (
+                                {availableMembers.map((m) => (
                                   <option key={m.id} value={m.id}>
                                     {m.full_name || m.email} ({m.role})
                                   </option>
                                 ))}
                               </select>
                             </div>
-                            {addMemberError && <p className="text-sm text-destructive">{addMemberError}</p>}
+                            {addMemberError && (
+                              <p className="text-sm text-destructive">{addMemberError}</p>
+                            )}
                             <Button onClick={() => handleAddMember(group.id)} className="w-full">
                               Add to Group
                             </Button>
@@ -463,22 +540,31 @@ export default function GroupsPage() {
                       <p className="text-xs text-muted-foreground italic">No members yet.</p>
                     ) : (
                       <div className="space-y-2">
-                        {gMembers.map(m => (
-                          <div key={m.id} className="flex items-center justify-between group p-2 rounded-lg hover:bg-muted/30 transition-colors">
+                        {gMembers.map((m) => (
+                          <div
+                            key={m.id}
+                            className="flex items-center justify-between group p-2 rounded-lg hover:bg-muted/30 transition-colors"
+                          >
                             <div className="flex items-center gap-2">
                               <div className="w-7 h-7 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center text-xs font-semibold text-primary">
-                                {(m.profile?.full_name || m.profile?.email || '?').charAt(0).toUpperCase()}
+                                {(m.user_profile?.full_name || m.user_profile?.email || '?').charAt(0).toUpperCase()}
                               </div>
                               <div>
-                                <p className="text-sm font-medium leading-none">{m.profile?.full_name || 'Unknown'}</p>
-                                <p className="text-xs text-muted-foreground mt-0.5">{m.profile?.email}</p>
+                                <p className="text-sm font-medium leading-none">
+                                  {m.user_profile?.full_name || 'Unknown'}
+                                </p>
+                                <p className="text-xs text-muted-foreground mt-0.5">
+                                  {m.user_profile?.email}
+                                </p>
                               </div>
                             </div>
                             <Button
                               variant="ghost"
                               size="icon"
                               className="h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
-                              onClick={() => handleRemoveMember(m.id, group.id, m.profile?.full_name || 'Member')}
+                              onClick={() =>
+                                handleRemoveMember(m.id, group.id, m.user_profile?.full_name || 'Member')
+                              }
                             >
                               <UserMinus className="w-3 h-3" />
                             </Button>
@@ -491,43 +577,58 @@ export default function GroupsPage() {
                   {/* Jobs Column */}
                   <div className="p-5 space-y-3">
                     <div className="flex items-center justify-between mb-2">
-                      <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Job Access</h3>
+                      <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+                        Job Access
+                      </h3>
                       <Dialog
                         open={assignJobGroupId === group.id}
-                        onOpenChange={open => {
+                        onOpenChange={(open) => {
                           setAssignJobGroupId(open ? group.id : null)
                           setAssignJobId('')
                           setAssignJobError('')
                         }}
                       >
                         <DialogTrigger asChild>
-                          <Button variant="outline" size="sm" className="h-7 text-xs" disabled={availableJobs.length === 0}>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs"
+                            disabled={availableJobs.length === 0}
+                          >
                             <Link2 className="w-3 h-3 mr-1" /> Link Job
                           </Button>
                         </DialogTrigger>
                         <DialogContent>
                           <DialogHeader>
-                            <DialogTitle>Link Job to "{group.name}"</DialogTitle>
-                            <DialogDescription>All group members will be able to view and manage candidates for this job.</DialogDescription>
+                            <DialogTitle>Link Job to &quot;{group.name}&quot;</DialogTitle>
+                            <DialogDescription>
+                              All group members will be able to view and manage candidates for this
+                              job.
+                            </DialogDescription>
                           </DialogHeader>
                           <div className="grid gap-4 py-4">
                             <div className="space-y-2">
                               <Label>Job Posting</Label>
                               <select
                                 value={assignJobId}
-                                onChange={e => setAssignJobId(e.target.value)}
+                                onChange={(e) => setAssignJobId(e.target.value)}
                                 className="flex h-10 w-full rounded-md border border-input bg-muted/50 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               >
                                 <option value="">Choose a job...</option>
-                                {availableJobs.map(j => (
+                                {availableJobs.map((j) => (
                                   <option key={j.id} value={j.id}>
                                     {j.title} ({j.status})
                                   </option>
                                 ))}
                               </select>
                             </div>
-                            {assignJobError && <p className="text-sm text-destructive">{assignJobError}</p>}
-                            <Button onClick={() => handleAssignJob(group.id)} className="w-full">
+                            {assignJobError && (
+                              <p className="text-sm text-destructive">{assignJobError}</p>
+                            )}
+                            <Button
+                              onClick={() => handleAssignJob(group.id)}
+                              className="w-full"
+                            >
                               Grant Access
                             </Button>
                           </div>
@@ -539,15 +640,26 @@ export default function GroupsPage() {
                       <p className="text-xs text-muted-foreground italic">No jobs linked yet.</p>
                     ) : (
                       <div className="space-y-2">
-                        {gAccess.map(a => (
-                          <div key={a.id} className="flex items-center justify-between group p-2 rounded-lg hover:bg-muted/30 transition-colors">
+                        {gAccess.map((a) => (
+                          <div
+                            key={a.id}
+                            className="flex items-center justify-between group p-2 rounded-lg hover:bg-muted/30 transition-colors"
+                          >
                             <div className="flex items-center gap-2">
                               <div className="w-7 h-7 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
                                 <Briefcase className="w-3 h-3 text-blue-500" />
                               </div>
                               <div>
-                                <p className="text-sm font-medium leading-none">{a.job?.title || 'Unknown Job'}</p>
-                                <p className={`text-xs mt-0.5 ${a.job?.status === 'active' ? 'text-emerald-500' : 'text-muted-foreground'}`}>
+                                <p className="text-sm font-medium leading-none">
+                                  {a.job?.title || 'Unknown Job'}
+                                </p>
+                                <p
+                                  className={`text-xs mt-0.5 ${
+                                    a.job?.status === 'active'
+                                      ? 'text-emerald-500'
+                                      : 'text-muted-foreground'
+                                  }`}
+                                >
                                   {a.job?.status}
                                 </p>
                               </div>

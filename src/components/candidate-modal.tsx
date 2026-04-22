@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { useImpersonation, getEffectiveUserId } from '@/lib/contexts/impersonation-context'
+import { useAuth } from '@/lib/contexts/auth-context'
+import { useImpersonation, getEffectiveUserId, getEffectiveCompanyId } from '@/lib/contexts/impersonation-context'
 import { Candidate, CandidateStatus, Job } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -38,8 +39,16 @@ const STATUS_OPTIONS: { value: CandidateStatus; label: string }[] = [
   { value: 'rejected', label: 'Rejected' },
 ]
 
-export default function CandidateModal({ isOpen, onClose, onSaved, candidate, preselectedJobId }: CandidateModalProps) {
+export default function CandidateModal({
+  isOpen,
+  onClose,
+  onSaved,
+  candidate,
+  preselectedJobId,
+}: CandidateModalProps) {
+  const { role, companyId, loading: authLoading } = useAuth()
   const { impersonating, data: impData } = useImpersonation()
+
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
   const [phone, setPhone] = useState('')
@@ -47,83 +56,148 @@ export default function CandidateModal({ isOpen, onClose, onSaved, candidate, pr
   const [resumeUrl, setResumeUrl] = useState('')
   const [jobId, setJobId] = useState('')
   const [status, setStatus] = useState<CandidateStatus>('applied')
-  
+
   const [availableJobs, setAvailableJobs] = useState<Job[]>([])
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState('')
 
   const supabase = createClient()
 
+  // ── Populate form when modal opens ───────────────────────────
   useEffect(() => {
-    if (isOpen) {
-      loadJobs()
-      if (candidate) {
-        setFullName(candidate.full_name)
-        setEmail(candidate.email)
-        setPhone(candidate.phone || '')
-        setSummary(candidate.summary || '')
-        setResumeUrl(candidate.resume_url || '')
-        setJobId(candidate.job_id)
-        setStatus(candidate.status)
-      } else {
-        setFullName('')
-        setEmail('')
-        setPhone('')
-        setSummary('')
-        setResumeUrl('')
-        setJobId(preselectedJobId || '')
-        setStatus('applied')
-      }
-      setError('')
+    if (!isOpen) return
+    loadJobs()
+
+    if (candidate) {
+      setFullName(candidate.full_name)
+      setEmail(candidate.email)
+      setPhone(candidate.phone || '')
+      setSummary(candidate.summary || '')
+      setResumeUrl(candidate.resume_url || '')
+      setJobId(candidate.job_id)
+      setStatus(candidate.status)
+    } else {
+      setFullName('')
+      setEmail('')
+      setPhone('')
+      setSummary('')
+      setResumeUrl('')
+      setJobId(preselectedJobId || '')
+      setStatus('applied')
     }
+    setError('')
   }, [isOpen, candidate, preselectedJobId])
 
+  // ── Load available jobs based on role ────────────────────────
   async function loadJobs() {
+    if (authLoading) return
+
     const { data: { user } } = await supabase.auth.getUser()
-    const targetUserId = getEffectiveUserId(impersonating, impData, user?.id)
-    if (!targetUserId) return
+    const effectiveUserId = getEffectiveUserId(impersonating, impData, user?.id)
+    const effectiveCompanyId = getEffectiveCompanyId(impersonating, impData, companyId ?? undefined)
 
-    let query = supabase.from('jobs').select('id, title').order('created_at', { ascending: false })
-    
-    // Explicitly add customer_id filter. For standard users it matches their own ID, for admins it matches impersonated ID.
-    query = query.eq('customer_id', targetUserId)
+    if (!effectiveUserId) return
 
-    const { data } = await query
-      
+    let data: Job[] | null = null
+
+    if (role === 'company_admin' && effectiveCompanyId && !impersonating) {
+      // Company Admin sees ALL jobs in their company
+      const res = await supabase
+        .from('jobs')
+        .select('id, title, customer_id, company_id, status, description, created_at, updated_at, job_type, location, salary_range')
+        .eq('company_id', effectiveCompanyId)
+        .eq('status', 'active')
+        .order('created_at', { ascending: false })
+      data = res.data as Job[] | null
+    } else {
+      // Customer: only their own jobs
+      const res = await supabase
+        .from('jobs')
+        .select('id, title, customer_id, company_id, status, description, created_at, updated_at, job_type, location, salary_range')
+        .eq('customer_id', effectiveUserId)
+        .eq('status', 'active')
+        .order('created_at', { ascending: false })
+      data = res.data as Job[] | null
+    }
+
     if (data) {
-      setAvailableJobs(data as Job[])
+      setAvailableJobs(data)
+      // Auto-select first job if none selected and no preselected
       if (!preselectedJobId && !candidate && data.length > 0 && !jobId) {
         setJobId(data[0].id)
       }
     }
   }
 
+  // ── Save candidate ────────────────────────────────────────────
   async function handleSubmit() {
     setError('')
-    if (!fullName || !email || !jobId) {
-      setError('Name, email, and Job assignment are required.')
+
+    if (!fullName.trim() || !email.trim() || !jobId) {
+      setError('Name, email, and job assignment are required.')
+      return
+    }
+
+    if (authLoading) {
+      setError('Please wait — loading your profile...')
+      return
+    }
+
+    // Verify authenticated session
+    const { data: { user } } = await supabase.auth.getUser()
+    const effectiveUserId = getEffectiveUserId(impersonating, impData, user?.id)
+    if (!effectiveUserId) {
+      setError('Authentication error. Please refresh the page and try again.')
+      return
+    }
+
+    // Verify the selected job is actually in our available list (prevents forged job_ids)
+    const selectedJob = availableJobs.find((j) => j.id === jobId)
+    if (!selectedJob) {
+      setError('Invalid job selection. Please choose a valid job from the list.')
       return
     }
 
     setIsSaving(true)
     try {
+      // NOTE: candidates table has NO company_id column.
+      // RLS is enforced via job_id → jobs (company_id / customer_id).
+      // stage_order and ai_score must be valid integers.
       const payload = {
-        full_name: fullName,
-        email,
-        phone: phone || null,
-        summary: summary || null,
-        resume_url: resumeUrl || null,
+        full_name: fullName.trim(),
+        email: email.trim().toLowerCase(),
+        phone: phone.trim() || null,
+        summary: summary.trim() || null,
+        resume_url: resumeUrl.trim() || null,
         status,
-        job_id: jobId,
-        updated_at: new Date().toISOString()
+        job_id: jobId,                 // ← validated UUID from availableJobs
+        updated_at: new Date().toISOString(),
       }
 
-      const { error: upsertError } = candidate 
-        ? await supabase.from('candidates').update(payload).eq('id', candidate.id)
-        : await supabase.from('candidates').insert([{ ...payload, stage_order: 0 }])
+      if (candidate) {
+        // UPDATE
+        const { error: updateErr } = await supabase
+          .from('candidates')
+          .update(payload)
+          .eq('id', candidate.id)
+        if (updateErr) throw updateErr
+      } else {
+        // INSERT — include required integer defaults
+        const { error: insertErr } = await supabase
+          .from('candidates')
+          .insert([{
+            ...payload,
+            stage_order: 0,   // ← integer (NOT null, NOT undefined)
+            ai_score: 0,      // ← integer (satisfies CHECK constraint 0-100)
+          }])
+        if (insertErr) {
+          const code = (insertErr as { code?: string }).code
+          if (code === '42501') throw new Error('Permission denied. You may not have access to this job.')
+          if (code === '23503') throw new Error('The selected job no longer exists.')
+          throw insertErr
+        }
+      }
 
-      if (upsertError) throw upsertError
-      
       onSaved()
       onClose()
     } catch (err) {
@@ -139,30 +213,55 @@ export default function CandidateModal({ isOpen, onClose, onSaved, candidate, pr
         <DialogHeader>
           <DialogTitle>{candidate ? 'Edit Candidate' : 'Add New Candidate'}</DialogTitle>
           <DialogDescription>
-            {candidate ? 'Update applicant details and status.' : 'Insert an applicant manually to the pipeline.'}
+            {candidate
+              ? 'Update applicant details and status.'
+              : 'Insert an applicant manually to the pipeline.'}
           </DialogDescription>
         </DialogHeader>
-        
+
         <div className="grid gap-4 py-4">
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Full Name <span className="text-destructive">*</span></Label>
-              <Input value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Full Name" className="bg-muted/50" />
+              <Input
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                placeholder="Full Name"
+                className="bg-muted/50"
+              />
             </div>
             <div className="space-y-2">
               <Label>Email <span className="text-destructive">*</span></Label>
-              <Input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="email@address.com" className="bg-muted/50" />
+              <Input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="email@address.com"
+                className="bg-muted/50"
+              />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Phone</Label>
-              <Input type="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="+46 70 123 4567" className="bg-muted/50" />
+              <Input
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="+46 70 123 4567"
+                className="bg-muted/50"
+              />
             </div>
             <div className="space-y-2">
               <Label>LinkedIn / Resume URL</Label>
-              <Input type="url" value={resumeUrl} onChange={e => setResumeUrl(e.target.value)} placeholder="https://linkedin.com/in/..." className="bg-muted/50" />
+              <Input
+                type="url"
+                value={resumeUrl}
+                onChange={(e) => setResumeUrl(e.target.value)}
+                placeholder="https://linkedin.com/in/..."
+                className="bg-muted/50"
+              />
             </div>
           </div>
 
@@ -174,9 +273,15 @@ export default function CandidateModal({ isOpen, onClose, onSaved, candidate, pr
                   <SelectValue placeholder="Select Job..." />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableJobs.map(job => (
-                    <SelectItem key={job.id} value={job.id}>{job.title}</SelectItem>
-                  ))}
+                  {availableJobs.length === 0 ? (
+                    <SelectItem value="_none" disabled>No active jobs found</SelectItem>
+                  ) : (
+                    availableJobs.map((job) => (
+                      <SelectItem key={job.id} value={job.id}>
+                        {job.title}
+                      </SelectItem>
+                    ))
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -187,8 +292,10 @@ export default function CandidateModal({ isOpen, onClose, onSaved, candidate, pr
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {STATUS_OPTIONS.map(opt => (
-                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  {STATUS_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -199,15 +306,19 @@ export default function CandidateModal({ isOpen, onClose, onSaved, candidate, pr
             <Label>Summary / Internal Note</Label>
             <textarea
               value={summary}
-              onChange={e => setSummary(e.target.value)}
+              onChange={(e) => setSummary(e.target.value)}
               placeholder="Brief candidate history or summary..."
               className="w-full px-3 py-2 border border-border bg-muted/50 rounded-md min-h-[100px] text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/50 resize-y"
             />
           </div>
 
           {error && <p className="text-sm font-medium text-destructive">{error}</p>}
-          
-          <Button onClick={handleSubmit} disabled={isSaving} className="w-full mt-2">
+
+          <Button
+            onClick={handleSubmit}
+            disabled={isSaving || authLoading}
+            className="w-full mt-2"
+          >
             {isSaving ? 'Saving...' : candidate ? 'Save Changes' : 'Create Candidate'}
           </Button>
         </div>
