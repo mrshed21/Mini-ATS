@@ -23,13 +23,12 @@ interface Group {
   created_at: string
 }
 
-interface GroupMember {
+interface GroupMemberRow {
   id: string
   group_id: string
   user_id: string
   added_by: string
   added_at: string
-  user_profile?: { full_name: string; email: string; role: string }
 }
 
 interface CompanyMember {
@@ -43,7 +42,6 @@ interface JobAccessRow {
   id: string
   job_id: string
   group_id: string
-  job?: { title: string; status: string }
 }
 
 interface CompanyJob {
@@ -60,7 +58,7 @@ export default function GroupsPage() {
   const [groups, setGroups] = useState<Group[]>([])
   const [members, setMembers] = useState<CompanyMember[]>([])
   const [jobs, setJobs] = useState<CompanyJob[]>([])
-  const [groupMembers, setGroupMembers] = useState<Record<string, GroupMember[]>>({})
+  const [groupMembers, setGroupMembers] = useState<Record<string, GroupMemberRow[]>>({})
   const [jobAccess, setJobAccess] = useState<Record<string, JobAccessRow[]>>({})
   const [loading, setLoading] = useState(true)
 
@@ -80,26 +78,37 @@ export default function GroupsPage() {
   const [assignJobId, setAssignJobId] = useState('')
   const [assignJobError, setAssignJobError] = useState('')
 
+  // ── Helper: resolve member profile from cached members list ──
+  function getMemberProfile(userId: string): CompanyMember | undefined {
+    return members.find((m) => m.id === userId)
+  }
+
+  // ── Helper: resolve job info from cached jobs list ───────────
+  function getJobInfo(jobId: string): CompanyJob | undefined {
+    return jobs.find((j) => j.id === jobId)
+  }
+
   // ── Load all data — wait for auth ────────────────────────────
   const loadAll = useCallback(async () => {
     if (authLoading || !companyId) return
     setLoading(true)
 
+    // Round 1: flat queries only — no joins, explicit company_id filter
     const [groupsRes, membersRes, jobsRes] = await Promise.all([
       supabase
         .from('job_groups')
         .select('*')
-        .eq('company_id', companyId)   // ← strict company filter
+        .eq('company_id', companyId)
         .order('created_at'),
       supabase
         .from('profiles')
         .select('id, full_name, email, role')
-        .eq('company_id', companyId)   // ← only this company's members
+        .eq('company_id', companyId)
         .order('full_name'),
       supabase
         .from('jobs')
-        .select('id, title, status, customer_id')
-        .eq('company_id', companyId)   // ← only this company's jobs
+        .select('id, title, status, customer_id, company_id')
+        .eq('company_id', companyId)
         .order('created_at', { ascending: false }),
     ])
 
@@ -115,21 +124,22 @@ export default function GroupsPage() {
     if (fetchedGroups.length > 0) {
       const groupIds = fetchedGroups.map((g) => g.id)
 
+      // Round 2: flat queries on join tables — no nested joins
       const [gMembersRes, jAccessRes] = await Promise.all([
         supabase
           .from('job_group_members')
-          .select('*, user_profile:profiles!job_group_members_user_id_fkey(full_name, email, role)')
+          .select('*')
           .in('group_id', groupIds),
         supabase
           .from('job_access')
-          .select('*, job:jobs(title, status)')
+          .select('*')
           .in('group_id', groupIds),
       ])
 
-      const gmMap: Record<string, GroupMember[]> = {}
+      const gmMap: Record<string, GroupMemberRow[]> = {}
       const jaMap: Record<string, JobAccessRow[]> = {}
 
-      ;(gMembersRes.data || []).forEach((m: GroupMember) => {
+      ;(gMembersRes.data || []).forEach((m: GroupMemberRow) => {
         if (!gmMap[m.group_id]) gmMap[m.group_id] = []
         gmMap[m.group_id].push(m)
       })
@@ -140,6 +150,9 @@ export default function GroupsPage() {
 
       setGroupMembers(gmMap)
       setJobAccess(jaMap)
+    } else {
+      setGroupMembers({})
+      setJobAccess({})
     }
 
     setLoading(false)
@@ -202,7 +215,7 @@ export default function GroupsPage() {
         .from('job_groups')
         .delete()
         .eq('id', group.id)
-        .eq('company_id', companyId)   // ← double safety
+        .eq('company_id', companyId)
 
       if (error) throw error
 
@@ -236,9 +249,9 @@ export default function GroupsPage() {
       const { error } = await supabase
         .from('job_group_members')
         .insert([{
-          group_id: groupId,              // ← explicit UUID
-          user_id: addMemberUserId,       // ← explicit UUID (validated above)
-          added_by: profile.id,           // ← explicit UUID
+          group_id: groupId,
+          user_id: addMemberUserId,
+          added_by: profile.id,
         }])
 
       if (error) {
@@ -308,9 +321,9 @@ export default function GroupsPage() {
       const { error } = await supabase
         .from('job_access')
         .insert([{
-          job_id: assignJobId,    // ← validated UUID
-          group_id: groupId,      // ← explicit UUID
-          granted_by: profile.id, // ← explicit UUID
+          job_id: assignJobId,
+          group_id: groupId,
+          granted_by: profile.id,
         }])
 
       if (error) {
@@ -540,36 +553,39 @@ export default function GroupsPage() {
                       <p className="text-xs text-muted-foreground italic">No members yet.</p>
                     ) : (
                       <div className="space-y-2">
-                        {gMembers.map((m) => (
-                          <div
-                            key={m.id}
-                            className="flex items-center justify-between group p-2 rounded-lg hover:bg-muted/30 transition-colors"
-                          >
-                            <div className="flex items-center gap-2">
-                              <div className="w-7 h-7 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center text-xs font-semibold text-primary">
-                                {(m.user_profile?.full_name || m.user_profile?.email || '?').charAt(0).toUpperCase()}
-                              </div>
-                              <div>
-                                <p className="text-sm font-medium leading-none">
-                                  {m.user_profile?.full_name || 'Unknown'}
-                                </p>
-                                <p className="text-xs text-muted-foreground mt-0.5">
-                                  {m.user_profile?.email}
-                                </p>
-                              </div>
-                            </div>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
-                              onClick={() =>
-                                handleRemoveMember(m.id, group.id, m.user_profile?.full_name || 'Member')
-                              }
+                        {gMembers.map((m) => {
+                          const mp = getMemberProfile(m.user_id)
+                          return (
+                            <div
+                              key={m.id}
+                              className="flex items-center justify-between group p-2 rounded-lg hover:bg-muted/30 transition-colors"
                             >
-                              <UserMinus className="w-3 h-3" />
-                            </Button>
-                          </div>
-                        ))}
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center text-xs font-semibold text-primary">
+                                  {(mp?.full_name || mp?.email || '?').charAt(0).toUpperCase()}
+                                </div>
+                                <div>
+                                  <p className="text-sm font-medium leading-none">
+                                    {mp?.full_name || 'Unknown'}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground mt-0.5">
+                                    {mp?.email}
+                                  </p>
+                                </div>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
+                                onClick={() =>
+                                  handleRemoveMember(m.id, group.id, mp?.full_name || 'Member')
+                                }
+                              >
+                                <UserMinus className="w-3 h-3" />
+                              </Button>
+                            </div>
+                          )
+                        })}
                       </div>
                     )}
                   </div>
@@ -640,40 +656,43 @@ export default function GroupsPage() {
                       <p className="text-xs text-muted-foreground italic">No jobs linked yet.</p>
                     ) : (
                       <div className="space-y-2">
-                        {gAccess.map((a) => (
-                          <div
-                            key={a.id}
-                            className="flex items-center justify-between group p-2 rounded-lg hover:bg-muted/30 transition-colors"
-                          >
-                            <div className="flex items-center gap-2">
-                              <div className="w-7 h-7 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
-                                <Briefcase className="w-3 h-3 text-blue-500" />
-                              </div>
-                              <div>
-                                <p className="text-sm font-medium leading-none">
-                                  {a.job?.title || 'Unknown Job'}
-                                </p>
-                                <p
-                                  className={`text-xs mt-0.5 ${
-                                    a.job?.status === 'active'
-                                      ? 'text-emerald-500'
-                                      : 'text-muted-foreground'
-                                  }`}
-                                >
-                                  {a.job?.status}
-                                </p>
-                              </div>
-                            </div>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
-                              onClick={() => handleRevokeJob(a.id, group.id, a.job?.title)}
+                        {gAccess.map((a) => {
+                          const jobInfo = getJobInfo(a.job_id)
+                          return (
+                            <div
+                              key={a.id}
+                              className="flex items-center justify-between group p-2 rounded-lg hover:bg-muted/30 transition-colors"
                             >
-                              <Link2Off className="w-3 h-3" />
-                            </Button>
-                          </div>
-                        ))}
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
+                                  <Briefcase className="w-3 h-3 text-blue-500" />
+                                </div>
+                                <div>
+                                  <p className="text-sm font-medium leading-none">
+                                    {jobInfo?.title || 'Unknown Job'}
+                                  </p>
+                                  <p
+                                    className={`text-xs mt-0.5 ${
+                                      jobInfo?.status === 'active'
+                                        ? 'text-emerald-500'
+                                        : 'text-muted-foreground'
+                                    }`}
+                                  >
+                                    {jobInfo?.status}
+                                  </p>
+                                </div>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
+                                onClick={() => handleRevokeJob(a.id, group.id, jobInfo?.title)}
+                              >
+                                <Link2Off className="w-3 h-3" />
+                              </Button>
+                            </div>
+                          )
+                        })}
                       </div>
                     )}
                   </div>

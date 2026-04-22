@@ -32,15 +32,26 @@ export default function DashboardPage() {
       if (targetUserId || targetCompanyId) {
         if (role === 'company_admin' && targetCompanyId && !impersonating) {
           // Company Admin: fetch all company jobs & candidates
-          const [{ count: jCount }, { count: cCount }, { data: rJobs }] = await Promise.all([
-            supabase.from('jobs').select('*', { count: 'exact', head: true }).eq('company_id', targetCompanyId),
-            supabase.from('candidates').select('id, job_id, jobs!inner(company_id)').eq('jobs.company_id', targetCompanyId),
+          // Note: split candidates query to avoid cross-table RLS recursion
+          const [jCountRes, rJobsRes] = await Promise.all([
+            supabase.from('jobs').select('id', { count: 'exact', head: true }).eq('company_id', targetCompanyId),
             supabase.from('jobs').select('*').eq('company_id', targetCompanyId).order('created_at', { ascending: false }).limit(5)
           ])
 
-          setJobsCount(jCount || 0)
-          setCandidatesCount(cCount || 0)
-          setRecentJobs(rJobs || [])
+          // Count candidates via job IDs to avoid inner join on RLS-protected tables
+          const companyJobIds = (rJobsRes.data || []).map((j: { id: string }) => j.id)
+          let totalCandidates = 0
+          if (companyJobIds.length > 0) {
+            const { count } = await supabase
+              .from('candidates')
+              .select('id', { count: 'exact', head: true })
+              .in('job_id', companyJobIds)
+            totalCandidates = count || 0
+          }
+
+          setJobsCount(jCountRes.count || 0)
+          setCandidatesCount(totalCandidates)
+          setRecentJobs(rJobsRes.data || [])
         } else {
           // Customer (or impersonated admin): fetch own jobs & candidates
           const [{ count: jCount }, { count: cCount }, { data: rJobs }] = await Promise.all([

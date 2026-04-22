@@ -52,25 +52,31 @@ export default function AllCandidatesPage() {
 
     if (role === 'company_admin' && targetCompanyId && !impersonating) {
       // Company Admin: fetch ALL candidates for ALL jobs in their company
-      // Uses join to filter only jobs that belong to this company
-      const [candidatesRes, jobsRes] = await Promise.all([
-        supabase
-          .from('candidates')
-          .select('*, job:jobs!inner(id, company_id, title)')
-          .eq('job.company_id', targetCompanyId)
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('jobs')
-          .select('*')
-          .eq('company_id', targetCompanyId)
-          .order('created_at', { ascending: false }),
-      ])
+      // Step 1: Fetch company jobs first (avoids cross-table RLS recursion from inner joins)
+      const jobsRes = await supabase
+        .from('jobs')
+        .select('*')
+        .eq('company_id', targetCompanyId)
+        .order('created_at', { ascending: false })
 
-      if (candidatesRes.error) console.error('Candidates error:', candidatesRes.error.message)
       if (jobsRes.error) console.error('Jobs error:', jobsRes.error.message)
+      const companyJobs = jobsRes.data || []
+      setJobs(companyJobs)
 
-      setCandidates(candidatesRes.data || [])
-      setJobs(jobsRes.data || [])
+      // Step 2: Fetch candidates for those job IDs only
+      if (companyJobs.length > 0) {
+        const jobIds = companyJobs.map((j: { id: string }) => j.id)
+        const candidatesRes = await supabase
+          .from('candidates')
+          .select('*')
+          .in('job_id', jobIds)
+          .order('created_at', { ascending: false })
+
+        if (candidatesRes.error) console.error('Candidates error:', candidatesRes.error.message)
+        setCandidates(candidatesRes.data || [])
+      } else {
+        setCandidates([])
+      }
     } else {
       // Customer or impersonated: own jobs + group-shared (RLS handles filtering)
       const [candidatesRes, jobsRes] = await Promise.all([

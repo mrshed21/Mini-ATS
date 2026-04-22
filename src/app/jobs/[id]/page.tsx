@@ -64,7 +64,7 @@ export default function JobCandidatesKanbanPage() {
   async function loadJob() {
     const { data } = await supabase
       .from('jobs')
-      .select('*, customer:profiles(*)')
+      .select('*')
       .eq('id', jobId)
       .single()
     setJob(data)
