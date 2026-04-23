@@ -75,7 +75,7 @@ export default function Sidebar() {
       : 'bg-blue-500/10 text-blue-500'
 
   return (
-    <div className="w-72 bg-card/50 backdrop-blur-3xl border-r border-border/50 min-h-screen flex flex-col relative z-20">
+    <div className="w-50 md:w-72 bg-card/50 backdrop-blur-3xl border-r border-border/50 min-h-screen flex flex-col relative z-20">
       {/* Brand */}
       <div className="p-6">
         <Link href="/" className="flex items-center gap-2 group">
