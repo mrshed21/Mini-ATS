@@ -86,7 +86,7 @@ export default function AllCandidatesPage() {
         setCandidates([])
       }
     } else if (targetUserId) {
-      // Regular customer/user: own jobs only
+      // Regular customer/user: own jobs + shared jobs (handled by RLS)
       const [candidatesRes, jobsRes] = await Promise.all([
         supabase
           .from('candidates')
@@ -95,7 +95,6 @@ export default function AllCandidatesPage() {
         supabase
           .from('jobs')
           .select('*')
-          .eq('customer_id', targetUserId)
           .order('created_at', { ascending: false }),
       ])
 
